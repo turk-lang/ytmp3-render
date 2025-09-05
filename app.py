@@ -68,17 +68,19 @@ def index():
 
             # --- yt-dlp ayarları ---
             ydl_opts = {
-                "outtmpl": outtmpl,
-                "noplaylist": True,
-                "quiet": True,
-                "no_warnings": True,
-                "format": "bestaudio/best",
-                "http_headers": {
-                    "User-Agent": "Mozilla/5.0",
-                    "Accept-Language": "en-US,en;q=0.9",
-                },
-                "cachedir": False,
-            }
+    "outtmpl": outtmpl,
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    # Eğer opus/m4a varsa onları, yoksa bestaudio
+    "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+    "http_headers": {
+        "User-Agent": "Mozilla/5.0",
+        "Accept-Language": "en-US,en;q=0.9",
+    },
+    "cachedir": False,
+}
+
 
             # Cookie varsa web client; yoksa android/tv fallback
             if cookie_ok:
