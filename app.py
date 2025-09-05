@@ -49,75 +49,73 @@ def sanitize_filename(name: str) -> str:
     name = re.sub(r"[^\w\s\-\.\(\)]", "", name, flags=re.UNICODE).strip()
     name = re.sub(r"\s+", " ", name)
     return name or datetime.now().strftime("%Y%m%d_%H%M%S")
-
 @app.route("/", methods=["GET", "POST"])
 def index():
-    msg = None
+    msg = ""
     filename = None
-    last_url = None
+    last_url = ""
 
     if request.method == "POST":
         url = (request.form.get("url") or "").strip()
         last_url = url
+        if not is_youtube_url(url):
+            msg = "❌ Lütfen geçerli bir YouTube video bağlantısı girin."
+        else:
+            use_ff = has_ffmpeg()
+            outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
 
-        if not url:
-            msg = "Lütfen bir YouTube URL'si gir."
-            return render_template_string(HTML, msg=msg, filename=filename, last_url=last_url)
+            # --- Cookie ve yt-dlp ayarları (girinti ÖNEMLİ) ---
+            cookie_ok = os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 0
 
-        use_ff = has_ffmpeg()
-        outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
-use_ff = has_ffmpeg()
-outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
+            ydl_opts = {
+                "outtmpl": outtmpl,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "format": "bestaudio/best",
+                "http_headers": {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
+                "cachedir": False,
+            }
 
-# Cookie dosyası var mı?
-cookie_ok = os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 0
+            if cookie_ok:
+                ydl_opts["cookiefile"] = COOKIE_PATH
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+            else:
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
 
-# Ortak ayarlar
-ydl_opts = {
-    "outtmpl": outtmpl,
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    "format": "bestaudio/best",
-    "http_headers": {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
-    "cachedir": False,
-}
+            if use_ff:
+                ydl_opts.update({
+                    "postprocessors": [{
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": "192",
+                    }],
+                    "postprocessor_args": ["-ar", "44100"],
+                    "prefer_ffmpeg": True,
+                })
+            # ---------------------------------------------------
 
-if cookie_ok:
-    ydl_opts["cookiefile"] = COOKIE_PATH
-    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
-else:
-    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
-
-
-if use_ff:
-    ydl_opts.update({
-        "postprocessors": [{"key": "FFmpegExtractAudio","preferredcodec": "mp3","preferredquality": "192"}],
-        "postprocessor_args": ["-ar", "44100"],
-        "prefer_ffmpeg": True,
-    })
-
-
-        try:
-            with YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                title = sanitize_filename(info.get("title") or "audio")
-                ext = "mp3" if use_ff else (info.get("ext") or "m4a")
-
-                # İndirilen en yeni dosyayı bul
-                files = sorted(
-                    (f for f in os.listdir(DOWNLOAD_DIR) if os.path.isfile(os.path.join(DOWNLOAD_DIR, f))),
-                    key=lambda fn: os.path.getmtime(os.path.join(DOWNLOAD_DIR, fn)),
-                    reverse=True
-                )
-                filename = files[0] if files else f"{title}.{ext}"
-
-            msg = "✅ MP3 dönüştürme başarılı." if use_ff else "ℹ️ FFmpeg yok; orijinal ses formatında indirildi."
-        except Exception as e:
-            msg = f"❌ Hata: {type(e).__name__}: {e}"
-            filename = None
+            try:
+                # İNDİRME
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=True)
+                    # ffmpeg yoksa indirilen orijinal uzantıyı bul
+                    if not use_ff:
+                        ext = info.get("ext") or "m4a"
+                        safe = re.sub(r"[\\/:*?\"<>|]", "_", info.get("title", "audio"))
+                        filename = f"{safe}.{ext}"
+                    else:
+                        safe = re.sub(r"[\\/:*?\"<>|]", "_", info.get("title", "audio"))
+                        filename = f"{safe}.mp3"
+                msg = "✅ Tamam!"
+            except Exception as e:
+                import traceback
+                print("YT-DLP ERROR:", traceback.format_exc())
+                msg = f"❌ Hata: {type(e).__name__}: {e}"
+                filename = None
 
     return render_template_string(HTML, msg=msg, filename=filename, last_url=last_url)
+
 
 @app.route("/downloads/<path:filename>")
 def download_file(filename):
