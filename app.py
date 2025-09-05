@@ -57,8 +57,14 @@ def index():
             outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
 
             # Cookie durumu
-            cookie_ok = os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 0
-            print("COOKIE_FOUND=", cookie_ok, "PATH=", COOKIE_PATH)
+            cookie_ok = False
+try:
+    if os.path.exists(COOKIE_PATH):
+        with open(COOKIE_PATH, "rb") as f:
+            cookie_ok = len(f.read().strip()) > 0
+except Exception as e:
+    print("COOKIE CHECK ERROR:", e)
+
 
             # Ortak yt-dlp ayarları
             ydl_opts = {
