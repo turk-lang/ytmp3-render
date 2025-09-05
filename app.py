@@ -4,6 +4,9 @@ import shutil
 from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory, url_for
 from yt_dlp import YoutubeDL
+COOKIE_PATH = "/etc/secrets/cookies.txt"
+
+
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
@@ -63,25 +66,37 @@ def index():
 
         use_ff = has_ffmpeg()
         outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
+use_ff = has_ffmpeg()
+outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
 
-        ydl_opts = {
-            "outtmpl": outtmpl,
-            "noplaylist": True,
-            "quiet": True,
-            "no_warnings": True,
-            "format": "bestaudio/best",
-        }
+# Cookie dosyası var mı?
+cookie_ok = os.path.exists(COOKIE_PATH) and os.path.getsize(COOKIE_PATH) > 0
 
-        if use_ff:
-            ydl_opts.update({
-                "postprocessors": [{
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "192",
-                }],
-                "postprocessor_args": ["-ar", "44100"],
-                "prefer_ffmpeg": True,
-            })
+# Ortak ayarlar
+ydl_opts = {
+    "outtmpl": outtmpl,
+    "noplaylist": True,
+    "quiet": True,
+    "no_warnings": True,
+    "format": "bestaudio/best",
+    "http_headers": {"User-Agent": "Mozilla/5.0", "Accept-Language": "en-US,en;q=0.9"},
+    "cachedir": False,
+}
+
+if cookie_ok:
+    ydl_opts["cookiefile"] = COOKIE_PATH
+    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+else:
+    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
+
+
+if use_ff:
+    ydl_opts.update({
+        "postprocessors": [{"key": "FFmpegExtractAudio","preferredcodec": "mp3","preferredquality": "192"}],
+        "postprocessor_args": ["-ar", "44100"],
+        "prefer_ffmpeg": True,
+    })
+
 
         try:
             with YoutubeDL(ydl_opts) as ydl:
