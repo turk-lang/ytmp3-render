@@ -5,18 +5,17 @@ from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory
 from yt_dlp import YoutubeDL
 
-# --- Ayarlar ---
+# === Yapılandırma ===
 COOKIE_PATH = "/etc/secrets/cookies.txt"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# --- Yardımcılar ---
+# === Yardımcılar ===
 def has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
 YOUTUBE_RE = re.compile(r"(youtu\.be/|youtube\.com/)")
-
 def is_youtube_url(u: str) -> bool:
     return bool(u and YOUTUBE_RE.search(u))
 
@@ -50,36 +49,38 @@ def index():
     if request.method == "POST":
         url = (request.form.get("url") or "").strip()
         last_url = url
+
         if not is_youtube_url(url):
             msg = "❌ Lütfen geçerli bir YouTube video bağlantısı girin."
         else:
             use_ff = has_ffmpeg()
             outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
 
-            # Cookie durumu
+            # --- Cookie (yalnızca OKUMA; read-only mount) ---
             cookie_ok = False
-try:
-    if os.path.exists(COOKIE_PATH):
-        with open(COOKIE_PATH, "rb") as f:
-            cookie_ok = len(f.read().strip()) > 0
-except Exception as e:
-    print("COOKIE CHECK ERROR:", e)
+            try:
+                if os.path.exists(COOKIE_PATH):
+                    with open(COOKIE_PATH, "rb") as f:
+                        cookie_ok = len(f.read().strip()) > 0
+            except Exception as ce:
+                print("COOKIE CHECK ERROR:", ce)
+            print("COOKIE_FOUND=", cookie_ok, "PATH=", COOKIE_PATH)
 
-
-            # Ortak yt-dlp ayarları
+            # --- yt-dlp ayarları ---
             ydl_opts = {
                 "outtmpl": outtmpl,
                 "noplaylist": True,
                 "quiet": True,
                 "no_warnings": True,
                 "format": "bestaudio/best",
-                "http_headers": {"User-Agent": "Mozilla/5.0",
-                                 "Accept-Language": "en-US,en;q=0.9"},
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
                 "cachedir": False,
             }
 
-            # Cookie varsa web client (tarayıcı çerezleri ile uyumlu)
-            # Yoksa android/tv fallback
+            # Cookie varsa web client; yoksa android/tv fallback
             if cookie_ok:
                 ydl_opts["cookiefile"] = COOKIE_PATH
                 ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
@@ -97,15 +98,17 @@ except Exception as e:
                     "prefer_ffmpeg": True,
                 })
 
+            # --- İndirme ---
             try:
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
-                    safe_title = re.sub(r'[\\/:*?"<>|]', "_", info.get("title", "audio"))
-                    if use_ff:
-                        filename = f"{safe_title}.mp3"
-                    else:
-                        ext = info.get("ext") or "m4a"
-                        filename = f"{safe_title}.{ext}"
+
+                safe_title = re.sub(r'[\\/:*?"<>|]', "_", info.get("title", "audio"))
+                if use_ff:
+                    filename = f"{safe_title}.mp3"
+                else:
+                    ext = info.get("ext") or "m4a"
+                    filename = f"{safe_title}.{ext}"
                 msg = "✅ Dönüştürme tamam!"
             except Exception as e:
                 import traceback
@@ -115,4 +118,4 @@ except Exception as e:
 
     return render_template_string(HTML, msg=msg, filename=filename, last_url=last_url)
 
-# Render/Gunicorn için entrypoint: app
+# Gunicorn entrypoint: app
