@@ -57,22 +57,28 @@ def index():
             outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
 
             # --- Cookie (yalnızca OKUMA; read-only mount) ---
-            cookie_ok = False
-            try:
-                if os.path.exists(COOKIE_PATH):
-                    with open(COOKIE_PATH, "rb") as f:
-                        cookie_ok = len(f.read().strip()) > 0
-            except Exception as ce:
-                print("COOKIE CHECK ERROR:", ce)
-            print("COOKIE_FOUND=", cookie_ok, "PATH=", COOKIE_PATH)
+          # --- Cookie (read-only → /tmp kopya) ---
+cookie_ok = False
+RUNTIME_COOKIE = "/tmp/cookies.txt"
+try:
+    if os.path.exists(COOKIE_PATH):
+        # /etc/secrets/cookies.txt → /tmp/cookies.txt (yazılabilir)
+        with open(COOKIE_PATH, "rb") as src, open(RUNTIME_COOKIE, "wb") as dst:
+            dst.write(src.read())
+        os.chmod(RUNTIME_COOKIE, 0o600)
+        cookie_ok = os.path.getsize(RUNTIME_COOKIE) > 0
+except Exception as ce:
+    print("COOKIE PREP ERROR:", ce)
 
-            # --- yt-dlp ayarları ---
-            ydl_opts = {
+print("COOKIE_FOUND=", cookie_ok, "SRC=", COOKIE_PATH, "RUNTIME=", RUNTIME_COOKIE)
+
+# --- yt-dlp ayarları ---
+ydl_opts = {
     "outtmpl": outtmpl,
     "noplaylist": True,
     "quiet": True,
     "no_warnings": True,
-    # Eğer opus/m4a varsa onları, yoksa bestaudio
+    # Esnek format seçici
     "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
     "http_headers": {
         "User-Agent": "Mozilla/5.0",
@@ -81,13 +87,13 @@ def index():
     "cachedir": False,
 }
 
+# Cookie varsa /tmp yolunu kullan (web client), yoksa android/tv fallback
+if cookie_ok:
+    ydl_opts["cookiefile"] = RUNTIME_COOKIE
+    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+else:
+    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
 
-            # Cookie varsa web client; yoksa android/tv fallback
-            if cookie_ok:
-                ydl_opts["cookiefile"] = COOKIE_PATH
-                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
-            else:
-                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
 
             if use_ff:
                 ydl_opts.update({
