@@ -1,17 +1,17 @@
 import os
 import re
 import shutil
-from datetime import datetime
 from flask import Flask, request, render_template_string, send_from_directory
 from yt_dlp import YoutubeDL
 
-# === Yapılandırma ===
-COOKIE_PATH = "/etc/secrets/cookies.txt"
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ==== Yapılandırma ====
+COOKIE_SRC = "/etc/secrets/cookies.txt"   # Secret Files (read-only)
+COOKIE_RT  = "/tmp/cookies.txt"           # Çalışma kopyası (yazılabilir)
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# === Yardımcılar ===
+# ==== Yardımcılar ====
 def has_ffmpeg() -> bool:
     return shutil.which("ffmpeg") is not None
 
@@ -56,45 +56,40 @@ def index():
             use_ff = has_ffmpeg()
             outtmpl = os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s")
 
-            # --- Cookie (yalnızca OKUMA; read-only mount) ---
-          # --- Cookie (read-only → /tmp kopya) ---
-cookie_ok = False
-RUNTIME_COOKIE = "/tmp/cookies.txt"
-try:
-    if os.path.exists(COOKIE_PATH):
-        # /etc/secrets/cookies.txt → /tmp/cookies.txt (yazılabilir)
-        with open(COOKIE_PATH, "rb") as src, open(RUNTIME_COOKIE, "wb") as dst:
-            dst.write(src.read())
-        os.chmod(RUNTIME_COOKIE, 0o600)
-        cookie_ok = os.path.getsize(RUNTIME_COOKIE) > 0
-except Exception as ce:
-    print("COOKIE PREP ERROR:", ce)
+            # --- Cookie: read-only → /tmp kopyası ---
+            cookie_ok = False
+            try:
+                if os.path.exists(COOKIE_SRC):
+                    with open(COOKIE_SRC, "rb") as src, open(COOKIE_RT, "wb") as dst:
+                        dst.write(src.read())
+                    os.chmod(COOKIE_RT, 0o600)
+                    cookie_ok = os.path.getsize(COOKIE_RT) > 0
+            except Exception as ce:
+                print("COOKIE PREP ERROR:", ce)
+            print("COOKIE_FOUND=", cookie_ok, "SRC=", COOKIE_SRC, "RT=", COOKIE_RT)
 
-print("COOKIE_FOUND=", cookie_ok, "SRC=", COOKIE_PATH, "RUNTIME=", RUNTIME_COOKIE)
+            # --- yt-dlp temel ayarlar ---
+            ydl_opts = {
+                "outtmpl": outtmpl,
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+                "http_headers": {
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept-Language": "en-US,en;q=0.9",
+                },
+                "cachedir": False,
+            }
 
-# --- yt-dlp ayarları ---
-ydl_opts = {
-    "outtmpl": outtmpl,
-    "noplaylist": True,
-    "quiet": True,
-    "no_warnings": True,
-    # Esnek format seçici
-    "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
-    "http_headers": {
-        "User-Agent": "Mozilla/5.0",
-        "Accept-Language": "en-US,en;q=0.9",
-    },
-    "cachedir": False,
-}
+            # Cookie varsa web client; yoksa android/tv fallback
+            if cookie_ok:
+                ydl_opts["cookiefile"] = COOKIE_RT
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
+            else:
+                ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
 
-# Cookie varsa /tmp yolunu kullan (web client), yoksa android/tv fallback
-if cookie_ok:
-    ydl_opts["cookiefile"] = RUNTIME_COOKIE
-    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["web"]}}
-else:
-    ydl_opts["extractor_args"] = {"youtube": {"player_client": ["android", "tv"]}}
-
-
+            # FFmpeg varsa MP3 postprocess
             if use_ff:
                 ydl_opts.update({
                     "postprocessors": [{
@@ -111,12 +106,13 @@ else:
                 with YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
 
-                safe_title = re.sub(r'[\\/:*?"<>|]', "_", info.get("title", "audio"))
+                safe = re.sub(r'[\\/:*?"<>|]', "_", info.get("title", "audio"))
                 if use_ff:
-                    filename = f"{safe_title}.mp3"
+                    filename = f"{safe}.mp3"
                 else:
                     ext = info.get("ext") or "m4a"
-                    filename = f"{safe_title}.{ext}"
+                    filename = f"{safe}.{ext}"
+
                 msg = "✅ Dönüştürme tamam!"
             except Exception as e:
                 import traceback
@@ -125,5 +121,3 @@ else:
                 filename = None
 
     return render_template_string(HTML, msg=msg, filename=filename, last_url=last_url)
-
-# Gunicorn entrypoint: app
