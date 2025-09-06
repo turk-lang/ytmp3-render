@@ -172,11 +172,12 @@ def index():
                         "prefer_ffmpeg": True,
                     })
 
-                # 1) İlk deneme: güçlü format zinciri
+                # 1) İlk deneme: basit format seçimi
                 success = False
                 try:
                     op1 = dict(base_opts)
-                    op1["format"] = "ba/140/251/250/249/171/bestaudio/best"
+                    # Daha güvenli format string'i
+                    op1["format"] = "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best"
                     
                     with YoutubeDL(op1) as y: 
                         info = y.extract_info(url, download=True)
@@ -189,44 +190,69 @@ def index():
                     msg = f"✅ '{title}' başarıyla {'MP3' if use_ff else ext.upper()}'e dönüştürüldü!"
                     success = True
                     
-                except DownloadError as e:
-                    print("FIRST TRY FAILED:", e)
-                    # 2) İkinci deneme: format listesi ve seçim
+                except (DownloadError, Exception) as e:
+                    print("FIRST TRY FAILED:", str(e))
+                    # 2) İkinci deneme: format ID ile
                     try:
-                        info_probe, fmts = list_formats(url, cookie_ok)
+                        # Önce info alıp format seç
+                        info_opts = dict(base_opts)
+                        info_opts["skip_download"] = True
                         
-                        if not fmts:
-                            msg = "❌ Bu video için format bilgisi alınamadı."
+                        with YoutubeDL(info_opts) as y:
+                            info_probe = y.extract_info(url, download=False)
+                        
+                        if not info_probe:
+                            msg = "❌ Video bilgisi alınamadı. Video özel veya yaş sınırlı olabilir."
                         else:
-                            print("Available formats:")
-                            for f in fmts[:8]:
-                                print("FMT", f.get("format_id"), f.get("ext"), 
-                                      f.get("acodec"), f.get("vcodec"), 
-                                      f.get("abr"), f.get("tbr"))
-                            
-                            chosen = pick_audio(fmts)
-                            if not chosen:
-                                msg = "❌ Bu video için uygun ses formatı bulunamadı."
+                            formats = info_probe.get("formats") or []
+                            if not formats:
+                                msg = "❌ Bu video için format bilgisi bulunamadı."
                             else:
-                                fmt_id = chosen.get("format_id")
-                                op2 = dict(base_opts)
-                                op2["format"] = str(fmt_id)
+                                # En iyi ses formatını seç
+                                audio_formats = []
+                                for f in formats:
+                                    acodec = f.get("acodec")
+                                    vcodec = f.get("vcodec") 
+                                    if acodec and acodec != "none" and (not vcodec or vcodec == "none"):
+                                        audio_formats.append(f)
                                 
-                                with YoutubeDL(op2) as y: 
-                                    info = y.extract_info(url, download=True)
+                                if not audio_formats:
+                                    # Ses formatı bulamazsa herhangi bir format dene
+                                    chosen_format = formats[0] if formats else None
+                                else:
+                                    # En yüksek bitrate'li ses formatını seç
+                                    chosen_format = max(audio_formats, key=lambda x: x.get("abr", 0) or x.get("tbr", 0) or 0)
                                 
-                                title = info.get("title", "audio")
-                                safe_title = clean_filename(title)
-                                ext = "mp3" if use_ff else (info.get('ext') or 'm4a')
-                                filename = f"{safe_title}.{ext}"
-                                
-                                msg = f"✅ '{title}' başarıyla {'MP3' if use_ff else ext.upper()}'e dönüştürüldü!"
-                                success = True
+                                if chosen_format:
+                                    format_id = chosen_format.get("format_id")
+                                    op2 = dict(base_opts)
+                                    op2["format"] = format_id
+                                    
+                                    with YoutubeDL(op2) as y: 
+                                        info = y.extract_info(url, download=True)
+                                    
+                                    title = info.get("title", "audio")
+                                    safe_title = clean_filename(title)
+                                    ext = "mp3" if use_ff else (info.get('ext') or 'm4a')
+                                    filename = f"{safe_title}.{ext}"
+                                    
+                                    msg = f"✅ '{title}' başarıyla {'MP3' if use_ff else ext.upper()}'e dönüştürüldü!"
+                                    success = True
+                                else:
+                                    msg = "❌ Uygun format bulunamadı."
                     
                     except Exception as e2:
                         import traceback
                         print("SECOND TRY ERROR:\n", traceback.format_exc())
-                        msg = f"❌ İndirme hatası: {str(e2)}"
+                        error_msg = str(e2)
+                        if "Sign in to confirm your age" in error_msg:
+                            msg = "❌ Bu video yaş sınırlaması nedeniyle indirilemez."
+                        elif "Private video" in error_msg:
+                            msg = "❌ Bu video özel olarak ayarlanmış ve indirilemez."
+                        elif "Video unavailable" in error_msg:
+                            msg = "❌ Video mevcut değil veya kaldırılmış."
+                        else:
+                            msg = f"❌ İndirme hatası: Video erişilemez durumda."
                 
                 except Exception as e:
                     import traceback
