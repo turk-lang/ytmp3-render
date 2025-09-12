@@ -1,15 +1,14 @@
-# Temel imaj
 FROM python:3.11-slim
 
-# Çalışma dizini
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates tzdata \
+ && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
-# Gereksiz cache olmadan paketler
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Uygulama dosyaları
 COPY . .
 
-# Render PORT ortam değişkenini kullan
-CMD ["bash", "-c", "gunicorn app:app -b 0.0.0.0:${PORT:-5000} --timeout 600 --workers 1 --threads 2 --keep-alive 120"]
+CMD ["bash","-lc","gunicorn app:app -b 0.0.0.0:${PORT:-10000} --timeout 600 --workers 1 --threads 2 --keep-alive 120"]
