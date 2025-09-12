@@ -1,21 +1,39 @@
-import os, shutil, time
-from flask import Flask, request, render_template_string, send_from_directory, url_for
+import os
+import re
+import time
+import shutil
+from flask import Flask, request, render_template_string, send_from_directory
 from yt_dlp import YoutubeDL
 
 app = Flask(__name__)
 
+# ---- Paths
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DOWNLOAD_DIR = os.path.join(BASE_DIR, "downloads")
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
+# ---- Simple UI
+HTML = """
+<!doctype html>
+<title>YouTube MP3 İndirici</title>
+<h3>🎵 YouTube MP3 İndirici</h3>
+<form method="get">
+  <input style="width:520px" name="u" placeholder="https://www.youtube.com/watch?v=..." value="{{u or ''}}">
+  <button>MP3'e Dönüştür</button>
+</form>
+{% if err %}<p style="color:#b00">❌ {{err}}</p>{% endif %}
+{% if fn %}<p>✅ Hazır: <a href="/d/{{ fn }}">{{ fn }}</a></p>{% endif %}
+<p style="font-size:12px;color:#777">Not: FFmpeg varsa MP3'e dönüştürülür; yoksa orijinal ses indirilir.</p>
+"""
+
+# ---- Cookies helper
 def pick_cookiefile() -> str | None:
     """
-    Render'da Secret File olarak eklediğin cookies.txt genellikle /etc/secrets/cookies.txt olur.
-    Varsa /tmp/cookies.txt'e kopyalayıp onu kullanıyoruz (okuma-yazma güvenli).
-    Yoksa None döner.
+    Render Secret Files için tipik yolları dener; bulursa /tmp/cookies.txt'e kopyalar.
+    Ortam değişkeni YTDLP_COOKIES verilmişse onu önceliklendirir.
     """
     candidates = [
-        os.environ.get("YTDLP_COOKIES"),           # istersen env ile de geçebilirsin
+        os.environ.get("YTDLP_COOKIES"),
         "/etc/secrets/cookies.txt",
         "/etc/secrets/COOKIES.txt",
         "/etc/secrets/youtube-cookies.txt",
@@ -25,32 +43,37 @@ def pick_cookiefile() -> str | None:
             try:
                 dst = "/tmp/cookies.txt"
                 shutil.copyfile(c, dst)
-                # Dosya yaşı
-                age_sec = time.time() - os.path.getmtime(dst)
+                age = int(time.time() - os.path.getmtime(dst))
                 try:
                     lines = sum(1 for _ in open(dst, "r", encoding="utf-8", errors="ignore"))
                 except Exception:
                     lines = -1
-                print(f"[cookies] using: {dst}  age={int(age_sec)}s  lines={lines}")
+                print(f"[cookies] using: {dst} age={age}s lines={lines}")
                 return dst
             except Exception as e:
                 print(f"[cookies] copy failed {c} -> /tmp/cookies.txt : {e}")
     print("[cookies] not found")
     return None
 
+# ---- yt-dlp options
 def make_ydl(cookiefile: str | None, for_meta: bool = False) -> YoutubeDL:
-    """
-    YouTube anti-bot'u azaltmak için client fallback ve user-agent ekliyoruz.
-    Cookie varsa onu kullanıyoruz, yoksa tv/android client ile şansımızı arttırıyoruz.
-    """
-    postprocessors = []
     use_ff = shutil.which("ffmpeg") is not None
+    postprocessors = []
     if use_ff and not for_meta:
         postprocessors = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
+
+    # YouTube anti-bot'a karşı client fallback ve sağlam header’lar
+    extractor_args = {
+        "youtube": {
+            # cookie varsa web'i öne al; yoksa tv/android ile başla
+            "player_client": ["web", "tv", "android"] if cookiefile else ["tv", "android", "web"],
+            "skip": ["configs"],  # bazı bölgelerde gereksiz istekleri azaltır
+        }
+    }
 
     ydl_opts: dict = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).80s.%(ext)s"),
@@ -60,100 +83,89 @@ def make_ydl(cookiefile: str | None, for_meta: bool = False) -> YoutubeDL:
         "retries": 3,
         "fragment_retries": 3,
         "nocheckcertificate": True,
+        "nopart": True,
         "http_headers": {
-            # web’e benzeyen header
-            "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                           "AppleWebKit/537.36 (KHTML, like Gecko) "
-                           "Chrome/124.0 Safari/537.36"),
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0 Safari/537.36"
+            ),
             "Accept-Language": "en-US,en;q=0.9",
         },
-        # YouTube için client fallback: önce TV/Android sonra web
-        "extractor_args": {
-            "youtube": {
-                "player_client": ["tv", "android", "web"],
-                # Bazı bölgelerde yararlı olur:
-                "skip": ["configs"],
-            }
-        },
-        # TR’de geo engelde bazen yardımcı olur:
+        "extractor_args": extractor_args,
         "geo_bypass_country": "US",
-        "nopart": True,
         "postprocessors": postprocessors,
+        "noplaylist": True,
+        "no_warnings": True,
+        "cachedir": False,
     }
 
     if cookiefile:
         ydl_opts["cookiefile"] = cookiefile
-        # cookie olduğunda web client de sorunsuz olsun diye ilk sıraya ‘web’i de ekleyebiliriz
-        ydl_opts["extractor_args"]["youtube"]["player_client"] = ["web", "tv", "android"]
 
     return YoutubeDL(ydl_opts)
 
-INDEX_HTML = """
-<!doctype html>
-<title>YouTube MP3 İndirici</title>
-<h3>🎵 YouTube MP3 İndirici</h3>
-<form method="get">
-  <input style="width:520px" name="u" placeholder="https://www.youtube.com/watch?v=..." value="{{u or ''}}">
-  <button>MP3'e Dönüştür</button>
-</form>
-{% if err %}<p style="color:#b00">❌ {{err}}</p>{% endif %}
-{% if fn %}<p>✅ Hazır: <a href="{{ url_for('file', name=fn) }}">{{ fn }}</a></p>{% endif %}
-<p style="font-size:12px;color:#777">Not: FFmpeg varsa MP3'e dönüştürülür; yoksa orijinal ses indirilir.</p>
-"""
+# ---- Helpers
+def sanitize_name(title: str, ext: str) -> str:
+    safe = re.sub(r'[\\/:*?"<>|]', "_", title or "audio")
+    return f"{safe}.{ext}"
 
+# ---- Routes
 @app.route("/")
 def index():
-    url = request.args.get("u", "").strip()
+    url = (request.args.get("u") or "").strip()
     if not url:
-        return render_template_string(INDEX_HTML, u=url)
+        return render_template_string(HTML, u=url)
 
     cookiefile = pick_cookiefile()
 
-    def run_dl(fmt: str):
+    def run_dl(fmt: str | None):
         y = make_ydl(cookiefile, for_meta=False)
-        print(f"[yt-dlp] download fmt={fmt} cookie={'yes' if cookiefile else 'no'}")
+        if fmt:
+            y.params["format"] = fmt
+        print(f"[yt-dlp] download fmt={fmt or 'auto'} cookie={'yes' if cookiefile else 'no'}")
         return y.extract_info(url, download=True)
 
     try:
-        # Önce bestaudio (mp4/m4a tercih eder) – cookie varsa genelde 1. denemede geçer
+        # 1) Önce bestaudio – cookie varsa genelde geçer
         info = run_dl("bestaudio/best")
     except Exception as e1:
         print("FIRST TRY FAILED:", e1)
-        # İkinci deneme: tv/android fallback ile web itiraz ederse format seçimini esnet
         try:
+            # 2) Meta çek, en iyi ses formatını seç, tekrar dene
             y2 = make_ydl(cookiefile, for_meta=True)
-            meta = y2.extract_info(url, download=False)  # sadece meta
-            # en iyi sesi bul
-            a = next(
-                (f for f in sorted(meta.get("formats", []), key=lambda x: (x.get("abr") or 0), reverse=True)
-                 if f.get("acodec") != "none"), None)
-            if not a:
-                raise RuntimeError("No audio format found")
-            fmt_id = a.get("format_id") or "bestaudio/best"
+            meta = y2.extract_info(url, download=False)
+            formats = (meta or {}).get("formats") or []
+            # abr/tbr en yüksek olan ses akışını seç
+            audio_formats = [f for f in formats if (f.get("acodec") and f.get("acodec") != "none")]
+            audio_formats.sort(key=lambda f: float(f.get("abr") or f.get("tbr") or 0), reverse=True)
+            chosen = audio_formats[0] if audio_formats else None
+            fmt_id = (chosen.get("format_id") if chosen else None) or "bestaudio/best"
             print(f"[meta] picked format_id={fmt_id}")
-            y3 = make_ydl(cookiefile, for_meta=False)
-            info = y3.extract_info(url, download=True)
+            info = run_dl(fmt_id)
         except Exception as e2:
-            print("SECOND TRY ERROR:\n ", e2)
-            return render_template_string(INDEX_HTML, u=url,
-                                          err=f"DownloadError: {e1} / {e2}")
+            print("SECOND TRY ERROR:", e2)
+            return render_template_string(HTML, u=url, err=f"DownloadError: {e1} / {e2}")
 
-    fn = info.get("requested_downloads", [{}])[0].get("filepath") \
-        or info.get("requested_downloads", [{}])[0].get("filename")
-    if not fn:
-        # yt-dlp bazen farklı anahtar yazar
-        fn = info.get("filepath") or info.get("filename")
+    # Çıkan dosya ismi
+    reqs = info.get("requested_downloads") or []
+    fp = (reqs[0].get("filepath") or reqs[0].get("filename")) if reqs else None
+    if not fp:
+        fp = info.get("filepath") or info.get("filename")
+    if not fp or not os.path.exists(fp):
+        return render_template_string(HTML, u=url, err="İndirme başarılı ama dosya bulunamadı.")
 
-    if not fn:
-        return render_template_string(INDEX_HTML, u=url,
-                                      err="İndirme başarılı ama dosya adı bulunamadı.")
-    name = os.path.basename(fn)
-    return render_template_string(INDEX_HTML, u=url, fn=name)
+    name = os.path.basename(fp)
+    return render_template_string(HTML, u=url, fn=name)
 
 @app.route("/d/<path:name>")
-def file(name):
+def d(name):
     return send_from_directory(DOWNLOAD_DIR, name, as_attachment=True)
 
 @app.route("/healthz")
 def health():
     return "ok"
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", "5000"))
+    app.run(host="0.0.0.0", port=port)
