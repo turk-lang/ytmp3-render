@@ -1,22 +1,18 @@
 import os
 import re
 import shutil
+import time
 from flask import Flask, request, render_template_string, send_file
 from yt_dlp import YoutubeDL
 
 app = Flask(__name__)
 
-# İndirilen dosyaların yolu
 DOWNLOAD_DIR = "/tmp"
 
-# Basit HTML arayüz
 HTML_FORM = """
 <!DOCTYPE html>
 <html lang="tr">
-<head>
-  <meta charset="UTF-8">
-  <title>YT MP3 Converter</title>
-</head>
+<head><meta charset="UTF-8"><title>YT MP3 Converter</title></head>
 <body>
   <h2>YouTube → MP3</h2>
   <form method="POST">
@@ -24,14 +20,47 @@ HTML_FORM = """
     <button type="submit">İndir</button>
   </form>
   {% if msg %}<p>{{ msg }}</p>{% endif %}
-  {% if filename %}
-    <a href="/download/{{ filename }}">Dosyayı indir</a>
-  {% endif %}
-</body>
-</html>
+  {% if filename %}<a href="/download/{{ filename }}">Dosyayı indir</a>{% endif %}
+  <p style="color:#777;font-size:12px">Not: FFmpeg varsa MP3'e dönüştürülür; yoksa orijinal ses uzantısı kalır.</p>
+</body></html>
 """
 
+# --- NEW: Secret File -> /tmp/cookies.txt
+def ensure_cookiefile() -> str | None:
+    """
+    Render Secret Files (veya ENV ile verilen) cookies.txt'yi /tmp/cookies.txt'ye kopyalar.
+    Başarılıysa yol döner, yoksa None.
+    """
+    candidates = [
+        os.environ.get("YTDLP_COOKIES"),
+        "/etc/secrets/cookies.txt",
+        "/etc/secrets/COOKIES.txt",
+        "/etc/secrets/youtube-cookies.txt",
+        "/app/cookies.txt",  # local fallback (geliştirmede)
+    ]
+    for src in candidates:
+        if src and os.path.exists(src) and os.path.getsize(src) > 0:
+            try:
+                dst = "/tmp/cookies.txt"
+                # Kopyala sadece değişmişse
+                if not os.path.exists(dst) or os.path.getmtime(src) > os.path.getmtime(dst):
+                    shutil.copyfile(src, dst)
+                age = int(time.time() - os.path.getmtime(dst))
+                try:
+                    lines = sum(1 for _ in open(dst, "r", encoding="utf-8", errors="ignore"))
+                except Exception:
+                    lines = -1
+                print(f"[cookies] using: {dst} age={age}s lines={lines}")
+                return dst
+            except Exception as e:
+                print(f"[cookies] copy failed {src} -> /tmp/cookies.txt : {e}")
+    print("[cookies] not found")
+    return None
+
 def get_base_opts():
+    # Her çağrıda emin olmak için cookie’yi hazırla
+    cookie_path = ensure_cookiefile()
+
     opts = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
@@ -42,22 +71,22 @@ def get_base_opts():
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
-        "source_address": "0.0.0.0",  # ipv4 zorlaması
+        "source_address": "0.0.0.0",
         "http_headers": {
             "User-Agent": "Mozilla/5.0",
             "Accept-Language": "en-US,en;q=0.9"
         },
         "extractor_args": {
             "youtube": {
-                "player_client": ["web", "tv", "android"],
+                # cookie varsa web'i öne al; yoksa tv/android ile başla
+                "player_client": ["web", "tv", "android"] if cookie_path else ["tv", "android", "web"],
                 "skip": ["configs"],
             }
         },
         "geo_bypass_country": "US",
     }
-    # cookies
-    if os.path.exists("/tmp/cookies.txt"):
-        opts["cookiefile"] = "/tmp/cookies.txt"
+    if cookie_path:
+        opts["cookiefile"] = cookie_path
     return opts
 
 def extract_meta(url):
@@ -137,6 +166,10 @@ def index():
 @app.route("/download/<path:filename>")
 def download(filename):
     return send_file(os.path.join(DOWNLOAD_DIR, filename), as_attachment=True)
+
+@app.route("/healthz")
+def health():
+    return "ok"
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
