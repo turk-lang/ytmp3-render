@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: yt-mp3-flask
+    env: docker
+    plan: free
+    autoDeploy: true
+    disk:
+      name: downloads
+      mountPath: /var/data
+      sizeGB: 5
+    secretFiles:
+      - name: cookies.txt
+        mountPath: /etc/secrets/cookies.txt
+    envVars:
+      - key: YTDLP_PROXY
+        value: ""   # optional: http(s)://user:pass@host:port

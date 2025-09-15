@@ -1,81 +1,51 @@
 # -*- coding: utf-8 -*-
 """
-Flask-based YouTube → MP3 downloader using yt-dlp, tuned for Render.com.
+Render-friendly Flask app: YouTube → MP3 with yt-dlp
 
-- Accepts cookies.txt upload (saved to /tmp/cookies.txt)
-- Auto-loads a secret file at /etc/secrets/cookies.txt if present (Render Secret File)
-- FFmpeg-based MP3 conversion when available (Docker installs ffmpeg)
-- Fallback retry with Android-first player_client to help bypass bot checks
+- Cookies:
+  * Upload via UI (saved to /tmp/cookies.txt), OR
+  * Mount as Secret File at /etc/secrets/cookies.txt
+- Format selection:
+  * Probe available formats, pick a real audio format_id, then download
+- Fallbacks:
+  * Try multiple YouTube player_client orders (web/android/tv)
+- MP3:
+  * Uses FFmpeg if available; otherwise leaves original audio (m4a/webm)
+
+LEGAL: Only download content you have rights to. Respect YouTube ToS and local laws.
 """
-
 import os
 import shutil
-import traceback
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
-from flask import Flask, request, send_from_directory, render_template_string
+from flask import Flask, request, send_from_directory, render_template_string, jsonify
 from yt_dlp import YoutubeDL
+from yt_dlp.utils import DownloadError
 
+# ---------------------------- CONFIG ----------------------------
 
-def pick_best_audio_format(info_dict):
-    """
-    Given an info_dict (from ydl.extract_info(..., download=False)),
-    return a yt-dlp format selector string or a specific format_id that is available.
-    Preference order:
-      1) bestaudio with m4a
-      2) bestaudio (any)
-      3) best (if it has audio)
-    """
-    # Try a robust selector first
-    # This selector will be used first; if it fails, we will try a concrete format_id below.
-    robust_selector = "bestaudio[acodec!=none][ext=m4a]/bestaudio[acodec!=none]/best[acodec!=none]"
-    fmts = info_dict.get("formats") or []
-    if not fmts:
-        return robust_selector
-
-    # Build candidates (audio-only preferred)
-    candidates = []
-    for f in fmts:
-        # Some formats are video-only (no acodec). Prefer those with acodec.
-        acodec = f.get("acodec")
-        vcodec = f.get("vcodec")
-        has_audio = (acodec is not None) and (acodec != "none")
-        if not has_audio:
-            continue
-        # Score: audio-only slightly preferred over av; higher abr preferred
-        is_audio_only = (vcodec in (None, "none"))
-        abr = f.get("tbr") or f.get("abr") or 0
-        ext = (f.get("ext") or "").lower()
-        score = abr + (50 if is_audio_only else 0) + (10 if ext == "m4a" else 0)
-        candidates.append((score, f))
-
-    if not candidates:
-        # fall back to robust selector; postprocessor may still merge audio
-        return robust_selector
-
-    # pick the top candidate's format_id
-    candidates.sort(key=lambda x: x[0], reverse=True)
-    best_fmt = candidates[0][1]
-    fmt_id = best_fmt.get("format_id")
-    if fmt_id:
-        return fmt_id
-    return robust_selector
-APP_TITLE = "🎵 YouTube → MP3"
 DOWNLOAD_DIR = os.path.abspath(os.environ.get("DOWNLOAD_DIR", "/var/data"))
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
+
+PROXY = (
+    os.environ.get("YTDLP_PROXY")
+    or os.environ.get("HTTPS_PROXY")
+    or os.environ.get("HTTP_PROXY")
+    or os.environ.get("PROXY")
+)
+
+# ---------------------------- HTML ------------------------------
 
 HTML = r"""<!doctype html>
 <html lang="tr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>🎵 YouTube → MP3</title>
+  <title>YouTube → MP3</title>
   <style>
     :root { color-scheme: light dark; }
-    body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; 
-         max-width: 780px; margin: 32px auto; padding: 0 16px; line-height: 1.45}
-    h2{margin-bottom: 12px}
-    form{display:block; margin-top: 8px}
+    body{font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+         max-width: 780px; margin: 32px auto; padding: 0 16px; line-height: 1.5}
     input[type=text]{width:100%; padding:12px; border:1px solid #bbb; border-radius:10px}
     .row{display:flex; gap:8px; align-items:center; margin-top:12px}
     input[type=file]{flex:1}
@@ -88,7 +58,7 @@ HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <h2>🎵 YouTube → MP3</h2>
+  <h2>YouTube → MP3</h2>
   <form method="post" enctype="multipart/form-data">
     <input type="text" name="url" placeholder="https://www.youtube.com/watch?v=..." value="{{url or ''}}" required>
     <div class="row">
@@ -108,7 +78,13 @@ HTML = r"""<!doctype html>
 </html>
 """
 
+# ---------------------------- UTILS -----------------------------
+
+def ffmpeg_available() -> bool:
+    return shutil.which("ffmpeg") is not None
+
 def ensure_cookiefile() -> Optional[str]:
+    """Return a path to cookies.txt if present; prefer /tmp, else secret file."""
     tmp = "/tmp/cookies.txt"
     try:
         if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
@@ -138,13 +114,9 @@ def ensure_cookiefile() -> Optional[str]:
     print("[cookies] not found")
     return None
 
-def ffmpeg_available() -> bool:
-    return shutil.which("ffmpeg") is not None
-
-def common_opts() -> Dict[str, Any]:
-    # Optional outbound proxy support (Render can set HTTPS_PROXY or PROXY)
-    proxy = os.environ.get("YTDLP_PROXY") or os.environ.get("HTTPS_PROXY") or os.environ.get("HTTP_PROXY") or os.environ.get("PROXY")
-    base = {
+def common_opts(client_order: List[str], cookiefile: Optional[str]) -> Dict[str, Any]:
+    """Build a safe yt-dlp options dict without 'format' (set later)."""
+    opts: Dict[str, Any] = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
@@ -154,148 +126,126 @@ def common_opts() -> Dict[str, Any]:
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
-        "source_address": "0.0.0.0",
+        "source_address": "0.0.0.0",  # IPv4
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
             ),
-            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         },
-        "geo_bypass_country": "US",
-        **({"proxy": proxy} if proxy else {}),
+        "extractor_args": {
+            "youtube": {
+                "player_client": client_order,
+                "skip": ["configs"],
+            }
+        },
+        "geo_bypass_country": "TR",
     }
-
-def opts_primary() -> Dict[str, Any]:
-    cookie = ensure_cookiefile()
-    opts = common_opts()
-    opts["extractor_args"] = {
-        "youtube": {
-            "player_client": ["web", "tv", "android"] if cookie else ["tv", "android", "web"],
-            "skip": ["configs"],
-        }
-    }
-    if cookie:
-        opts["cookiefile"] = cookie
-    return attach_postprocessor(opts)
-
-def opts_fallback_android_first() -> Dict[str, Any]:
-    cookie = ensure_cookiefile()
-    opts = common_opts()
-    opts["extractor_args"] = {
-        "youtube": {
-            "player_client": ["android", "tv", "web"],
-            "skip": ["configs"],
-        }
-    }
-    if cookie:
-        opts["cookiefile"] = cookie
-    return attach_postprocessor(opts)
-
-
-def opts_fallback_ios_first() -> Dict[str, Any]:
-    cookie = ensure_cookiefile()
-    opts = common_opts()
-    opts["extractor_args"] = {
-        "youtube": {
-            "player_client": ["ios", "android", "tv", "web"],
-            "skip": ["configs"],
-        }
-    }
-    if cookie:
-        opts["cookiefile"] = cookie
-    return attach_postprocessor(opts)
-
-def opts_fallback_android_embedded() -> Dict[str, Any]:
-    cookie = ensure_cookiefile()
-    opts = common_opts()
-    # android_embedded can help sometimes
-    opts["extractor_args"] = {
-        "youtube": {
-            "player_client": ["android_embedded", "android", "tv", "web"],
-            "skip": ["configs"],
-        }
-    }
-    if cookie:
-        opts["cookiefile"] = cookie
-    return attach_postprocessor(opts)
-def attach_postprocessor(opts: Dict[str, Any]) -> Dict[str, Any]:
+    if PROXY:
+        opts["proxy"] = PROXY
+    if cookiefile:
+        opts["cookiefile"] = cookiefile
     if ffmpeg_available():
-        opts.update({
-            "postprocessors": [{
-                "key": "FFmpegExtractAudio",
-                "preferredcodec": "mp3",
-                "preferredquality": "192",
-            }],
-        })
-    else:
-        opts.update({"format": "bestaudio/best"})
+        opts["postprocessors"] = [{
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }]
     return opts
+
+def choose_format(info: Dict[str, Any]) -> str:
+    """Pick an actually available audio format_id. Prefer audio-only m4a with higher bitrate."""
+    fmts = info.get("formats") or []
+    candidates: List[Tuple[float, Dict[str, Any]]] = []
+    for f in fmts:
+        acodec = f.get("acodec")
+        vcodec = f.get("vcodec")
+        if not acodec or acodec == "none":
+            continue
+        is_audio_only = (vcodec in (None, "none"))
+        abr = f.get("abr") or f.get("tbr") or 0
+        ext = (f.get("ext") or "").lower()
+        score = (abr or 0) + (50 if is_audio_only else 0) + (10 if ext == "m4a" else 0)
+        candidates.append((score, f))
+    if not candidates:
+        # Fallback: yt-dlp will still try best; may be live/protected content
+        return "bestaudio/best"
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best = candidates[0][1]
+    fmt_id = best.get("format_id")
+    return fmt_id or "bestaudio/best"
 
 def run_download(url: str) -> str:
     if not url:
         raise ValueError("URL boş olamaz.")
 
-    def _download_with(opts: Dict[str, Any]) -> str:
-        before = set(os.listdir(DOWNLOAD_DIR))
-        with YoutubeDL(opts) as ydl:
-            # First, probe formats without downloading to decide a safe format
-            probe = ydl.extract_info(url, download=False)
-            fmt = pick_best_audio_format(probe)
-            opts_local = dict(opts)
-            opts_local['format'] = fmt
-            # Recreate YDL with concrete format
-        with YoutubeDL(opts_local) as y2:
-            info = y2.extract_info(url, download=True)
-            after = set(os.listdir(DOWNLOAD_DIR))
-            new_files = sorted(list(after - before))
-            if new_files:
-                new_files.sort(key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)), reverse=True)
-                return new_files[0]
-            # Fallback name (rare)
-            title = info.get("title") or "audio"
-            ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
-            return "".join(c for c in f"{title}.{ext}" if c not in "\\/:*?\"<>|").strip()
+    cookie = ensure_cookiefile()
 
-    # Try primary
-    try:
-        return _download_with(opts_primary())
-    except Exception as e1:
-        msg = str(e1).lower()
-        print("PRIMARY FAILED:", e1)
-        print(traceback.format_exc())
+    client_orders = []
+    if cookie:
+        client_orders = [
+            ["web", "android", "tv"],
+            ["android", "web", "tv"],
+            ["ios", "android", "tv", "web"],
+        ]
+    else:
+        client_orders = [
+            ["android", "tv", "web"],
+            ["web", "android", "tv"],
+            ["ios", "android", "tv", "web"],
+        ]
 
-        bot_hint = ("sign in to confirm you're not a bot" in msg) or ("bot olmadığınızı" in msg)
-
-
-        # Fallback 1: Android-first
+    last_err = None
+    for order in client_orders:
         try:
-            return _download_with(opts_fallback_android_first())
-        except Exception as e2:
-            print("FALLBACK ANDROID FAILED:", e2)
-            print(traceback.format_exc())
+            opts_probe = common_opts(order, cookie)
+            # Probe available formats
+            with YoutubeDL(opts_probe) as y1:
+                info = y1.extract_info(url, download=False)
+                if info.get("is_live"):
+                    raise DownloadError("Canlı yayınlar için indirme desteklenmiyor.")
+                fmt = choose_format(info)
 
-            # Fallback 2: iOS-first
-            try:
-                return _download_with(opts_fallback_ios_first())
-            except Exception as e3:
-                print("FALLBACK IOS FAILED:", e3)
-                print(traceback.format_exc())
+            # Now download with chosen format
+            opts_dl = dict(opts_probe)
+            opts_dl["format"] = fmt
 
-                # Fallback 3: android_embedded
-                try:
-                    return _download_with(opts_fallback_android_embedded())
-                except Exception as e4:
-                    print("FALLBACK ANDROID_EMBEDDED FAILED:", e4)
-                    print(traceback.format_exc())
-                    if bot_hint:
-                        raise RuntimeError(
-                            f"{e1}\\n\\nİpucu: cookies.txt yükleyin (YouTube oturum çerezleri) "
-                            f"veya Render'da /etc/secrets/cookies.txt olarak Secret File ekleyin. "
-                            f"Gerekirse YTDLP_PROXY ile bir residential proxy tanımlayın."
-                        )
-                    raise e4
+            before = set(os.listdir(DOWNLOAD_DIR))
+            with YoutubeDL(opts_dl) as y2:
+                y2.download([url])
+            after = set(os.listdir(DOWNLOAD_DIR))
+            new_files = sorted(after - before, key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)), reverse=True)
+            if new_files:
+                return new_files[0]
+            # Fallback: construct name from title/ext if needed
+            title = (info.get("title") or "audio").strip()
+            ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
+            safe = "".join(c for c in f"{title}.{ext}" if c not in "\\/:*?\"<>|").strip()
+            return safe
+        except Exception as e:
+            last_err = e
+            print(f"[retry] order={order} error={e}")
+
+    # If we reach here, all attempts failed
+    err_msg = str(last_err) if last_err else "Bilinmeyen hata"
+    # Add guidance for bot verification cases
+    low = err_msg.lower()
+    hint = ""
+    if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
+        hint = (
+            "\nİpucu: Geçerli bir cookies.txt ekleyin (YouTube hesabınızda oturum açıp çıkarın) "
+            "veya residential bir proxy ayarlayın (YTDLP_PROXY)."
+        )
+    raise RuntimeError(err_msg + hint)
+
+# ---------------------------- APP -------------------------------
+
 app = Flask(__name__)
+
+@app.get("/health")
+def health():
+    return jsonify(ok=True)
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -323,14 +273,14 @@ def index():
         except Exception as e1:
             err_txt = str(e1)
             print("DOWNLOAD ERROR:", err_txt)
-            print(traceback.format_exc())
             hint = ""
-            lower = (err_txt or "").lower()
-            if ("sign in to confirm you're not a bot" in lower) or ("bot olmadığınızı" in lower):
+            low = (err_txt or "").lower()
+            if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
                 hint = (
                     "<br><b>Öneri:</b> Tarayıcıda YouTube oturumu açıkken "
                     "<i>cookies.txt</i> çıkarıp buradan yükleyin <i>veya</i> "
-                    "Render'da Secret File olarak <code>/etc/secrets/cookies.txt</code> ekleyin."
+                    "Render'da Secret File olarak <code>/etc/secrets/cookies.txt</code> ekleyin. "
+                    "Gerekirse <code>YTDLP_PROXY</code> kullanın."
                 )
             msg = f"❌ İndirme Hatası: {err_txt}{hint}"
 
