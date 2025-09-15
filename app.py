@@ -1,27 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-A minimal Flask-based YouTube → MP3 downloader using yt-dlp.
+Flask-based YouTube → MP3 downloader using yt-dlp, tuned for Render.com.
 
-Features:
-- Handles YouTube's "sign in to confirm you're not a bot" by letting the user upload cookies.txt.
-- Also *attempts* to pull cookies from a local browser (Chrome/Firefox) if available (for local desktop usage).
-- Converts to MP3 when FFmpeg is installed; otherwise leaves the original audio format (m4a/webm).
-- Clean UI with a file input to upload cookies and a link to download the finalized file.
-
-⚠ Legal note: Only download content you have rights to. Respect YouTube Terms of Service and local laws.
+- Accepts cookies.txt upload (saved to /tmp/cookies.txt)
+- Auto-loads a secret file at /etc/secrets/cookies.txt if present (Render Secret File)
+- FFmpeg-based MP3 conversion when available (Docker installs ffmpeg)
+- Fallback retry with Android-first player_client to help bypass bot checks
 """
 
-"""
-Requirements:
-    pip install Flask yt-dlp
-
-Run:
-    BROWSER=chrome python app.py
-or simply:
-    python app.py
-
-Then open http://127.0.0.1:5000/
-"""
 import os
 import shutil
 import traceback
@@ -30,13 +16,9 @@ from typing import Optional, Dict, Any
 from flask import Flask, request, send_from_directory, render_template_string
 from yt_dlp import YoutubeDL
 
-# ---------------------------- Config ----------------------------
-
 APP_TITLE = "🎵 YouTube → MP3"
-DOWNLOAD_DIR = os.path.abspath(os.environ.get("DOWNLOAD_DIR", "/mnt/data/downloads"))
+DOWNLOAD_DIR = os.path.abspath(os.environ.get("DOWNLOAD_DIR", "/var/data"))
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
-
-# ---------------------------- HTML -----------------------------
 
 HTML = r"""<!doctype html>
 <html lang="tr">
@@ -82,15 +64,7 @@ HTML = r"""<!doctype html>
 </html>
 """
 
-# ---------------------------- Utils ----------------------------
-
 def ensure_cookiefile() -> Optional[str]:
-    """
-    Returns a path to a cookies.txt file if available.
-    Precedence:
-      1) /tmp/cookies.txt (uploaded by user via UI)
-      2) $YTDLP_COOKIES, /etc/secrets/*.txt, /app/cookies.txt (container / server)
-    """
     tmp = "/tmp/cookies.txt"
     try:
         if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
@@ -111,7 +85,6 @@ def ensure_cookiefile() -> Optional[str]:
             continue
         try:
             if os.path.exists(src) and os.path.getsize(src) > 0:
-                # Copy into /tmp to unify downstream path usage
                 shutil.copyfile(src, tmp)
                 print(f"[cookies] copied {src} -> {tmp}")
                 return tmp
@@ -121,31 +94,11 @@ def ensure_cookiefile() -> Optional[str]:
     print("[cookies] not found")
     return None
 
-
 def ffmpeg_available() -> bool:
     return shutil.which("ffmpeg") is not None
 
-
-def base_opts() -> Dict[str, Any]:
-    """
-    Build a base options dict for YoutubeDL.
-    - Prefers cookiefile if available; otherwise tries cookies-from-browser (local desktop runs).
-    - Tunes player_client order to mitigate bot checks.
-    """
-    cookie = ensure_cookiefile()
-
-    # Try pulling cookies from a local browser (for LOCAL desktop usage)
-    cookies_from_browser = None
-    browser = (os.environ.get("BROWSER") or "").lower()
-    if browser in ("chrome", "chromium", "edge", "brave", "vivaldi"):
-        cookies_from_browser = ("chrome", None, None, None)
-    elif browser == "firefox":
-        cookies_from_browser = ("firefox", None, None, None)
-    else:
-        # Attempt Chrome by default; yt-dlp will skip if unavailable
-        cookies_from_browser = ("chrome", None, None, None)
-
-    opts: Dict[str, Any] = {
+def common_opts() -> Dict[str, Any]:
+    return {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
@@ -155,7 +108,7 @@ def base_opts() -> Dict[str, Any]:
         "fragment_retries": 3,
         "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
-        "source_address": "0.0.0.0",  # prefer IPv4
+        "source_address": "0.0.0.0",
         "http_headers": {
             "User-Agent": (
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -163,22 +116,36 @@ def base_opts() -> Dict[str, Any]:
             ),
             "Accept-Language": "en-US,en;q=0.9",
         },
-        "extractor_args": {
-            "youtube": {
-                # If we have a cookie file, try web first; otherwise start with tv/android (less bot checks)
-                "player_client": ["web", "tv", "android"] if cookie else ["tv", "android", "web"],
-                "skip": ["configs"],
-            }
-        },
         "geo_bypass_country": "US",
     }
 
+def opts_primary() -> Dict[str, Any]:
+    cookie = ensure_cookiefile()
+    opts = common_opts()
+    opts["extractor_args"] = {
+        "youtube": {
+            "player_client": ["web", "tv", "android"] if cookie else ["tv", "android", "web"],
+            "skip": ["configs"],
+        }
+    }
     if cookie:
         opts["cookiefile"] = cookie
-    else:
-        opts["cookiesfrombrowser"] = cookies_frombrowser
+    return attach_postprocessor(opts)
 
-    # Post-process to MP3 when FFmpeg exists; else just grab bestaudio
+def opts_fallback_android_first() -> Dict[str, Any]:
+    cookie = ensure_cookiefile()
+    opts = common_opts()
+    opts["extractor_args"] = {
+        "youtube": {
+            "player_client": ["android", "tv", "web"],
+            "skip": ["configs"],
+        }
+    }
+    if cookie:
+        opts["cookiefile"] = cookie
+    return attach_postprocessor(opts)
+
+def attach_postprocessor(opts: Dict[str, Any]) -> Dict[str, Any]:
     if ffmpeg_available():
         opts.update({
             "format": "bestaudio/best",
@@ -187,47 +154,53 @@ def base_opts() -> Dict[str, Any]:
                 "preferredcodec": "mp3",
                 "preferredquality": "192",
             }],
-            # Keep both? No—by default it removes source after conversion
         })
     else:
         opts.update({"format": "bestaudio/best"})
-
     return opts
 
-
 def run_download(url: str) -> str:
-    """
-    Executes yt-dlp download. Returns the final filename (basename only).
-    If MP3 conversion is enabled, extension will be .mp3.
-    """
     if not url:
         raise ValueError("URL boş olamaz.")
 
-    opts = base_opts()
+    def _download_with(opts: Dict[str, Any]) -> str:
+        before = set(os.listdir(DOWNLOAD_DIR))
+        with YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            after = set(os.listdir(DOWNLOAD_DIR))
+            new_files = sorted(list(after - before))
+            if new_files:
+                new_files.sort(key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)), reverse=True)
+                return new_files[0]
+            # Fallback name (rare)
+            title = info.get("title") or "audio"
+            ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
+            return "".join(c for c in f"{title}.{ext}" if c not in "\\/:*?\"<>|").strip()
 
-    before = set(os.listdir(DOWNLOAD_DIR))
-    with YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        # Detect newly created/modified files
-        after = set(os.listdir(DOWNLOAD_DIR))
-        new_files = sorted(list(after - before))
-        if new_files:
-            # Return the newest file (in case multiple artifacts appear)
-            new_files.sort(key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)), reverse=True)
-            return new_files[0]
+    # Try primary
+    try:
+        return _download_with(opts_primary())
+    except Exception as e1:
+        msg = str(e1).lower()
+        print("PRIMARY FAILED:", e1)
+        print(traceback.format_exc())
 
-        # Fallback (should rarely happen)
-        title = info.get("title") or "audio"
-        ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
-        filename = f"{title}.{ext}"
-        safe = "".join(c for c in filename if c not in "\\/:*?\"<>|").strip()
-        return safe
+        bot_hint = ("sign in to confirm you're not a bot" in msg) or ("bot olmadığınızı" in msg)
 
-
-# ---------------------------- Flask App ----------------------------
+        # Fallback: Android-first order (works for some bot-check cases)
+        try:
+            return _download_with(opts_fallback_android_first())
+        except Exception as e2:
+            print("FALLBACK FAILED:", e2)
+            print(traceback.format_exc())
+            if bot_hint:
+                raise RuntimeError(
+                    f"{e1}\n\nİpucu: cookies.txt yükleyin (YouTube'da giriş yapıp çerezleri alın) "
+                    f"veya Render'da /etc/secrets/cookies.txt olarak Secret File ekleyin."
+                )
+            raise e2
 
 app = Flask(__name__)
-
 
 @app.route("/", methods=["GET", "POST"])
 def index():
@@ -238,7 +211,7 @@ def index():
     if request.method == "POST":
         url = (request.form.get("url") or "").strip()
 
-        # Handle uploaded cookies.txt (optional)
+        # Optional cookies.txt upload via UI
         file = request.files.get("cookies")
         if file and file.filename:
             try:
@@ -254,29 +227,23 @@ def index():
             msg = "✅ İndirme başarıyla tamamlandı."
         except Exception as e1:
             err_txt = str(e1)
-            print("PRIMARY DOWNLOAD FAILED:", err_txt)
+            print("DOWNLOAD ERROR:", err_txt)
             print(traceback.format_exc())
-
-            # Friendly hint when YouTube wants sign-in/bot check
             hint = ""
             lower = (err_txt or "").lower()
             if ("sign in to confirm you're not a bot" in lower) or ("bot olmadığınızı" in lower):
                 hint = (
                     "<br><b>Öneri:</b> Tarayıcıda YouTube oturumu açıkken "
-                    "<i>cookies.txt</i> çıkarıp buradan yükleyin ya da uygulamayı "
-                    "<code>BROWSER=chrome</code> şeklinde çalıştırın."
+                    "<i>cookies.txt</i> çıkarıp buradan yükleyin <i>veya</i> "
+                    "Render'da Secret File olarak <code>/etc/secrets/cookies.txt</code> ekleyin."
                 )
-
             msg = f"❌ İndirme Hatası: {err_txt}{hint}"
 
     return render_template_string(HTML, msg=msg, filename=filename, url=url)
 
-
 @app.route("/download/<path:filename>")
 def download(filename):
-    # Security: serve only from DOWNLOAD_DIR
     return send_from_directory(DOWNLOAD_DIR, filename, as_attachment=True)
-
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
