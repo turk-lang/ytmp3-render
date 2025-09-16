@@ -22,11 +22,4 @@ COPY app.py .
 ENV DOWNLOAD_DIR=/var/data
 
 # Dayanıklı Gunicorn ayarları (Render $PORT’u otomatik verir)
-CMD ["bash","-lc","gunicorn app:app \
-  --bind 0.0.0.0:$PORT \
-  --workers 1 \
-  --threads 2 \
-  --timeout 300 \
-  --graceful-timeout 30 \
-  --keep-alive 75 \
-  --log-level info"]
+CMD ["bash","-lc","gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --timeout 300 --graceful-timeout 30 --keep-alive 75 --log-level info"]
