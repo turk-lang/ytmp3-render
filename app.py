@@ -1,27 +1,31 @@
 # -*- coding: utf-8 -*-
 """
-Render-friendly Flask app: YouTube → MP3 with yt-dlp
+Render-friendly Flask app: YouTube → MP3 with yt-dlp (PRG ile form sıfırlama)
 
-- Cookies: UI upload (/tmp/cookies.txt) or Render Secret File (/etc/secrets/cookies.txt)
-- Player client uyumluluğu: player_client daima STRING ("web,android,tv") -> split() hatası yok
-- Strateji sıraları: web / android / tv / ios kombinasyonları
-- Format seçimi: önce probe, en iyi gerçek ses formatını seç, sonra indir
-- MP3: FFmpeg varsa mp3'e çevirir; yoksa orijinal ses uzantısı kalır
+- Cookies: UI upload (/tmp/cookies.txt) veya Render Secret File (/etc/secrets/cookies.txt)
+- Player client: daima STRING ("web,android,tv") -> split() hatası yok
+- Stratejiler: web/android/tv/ios kombinasyonları
+- Format seçimi: probe -> mevcut en iyi ses formatını seç -> indir
+- MP3: FFmpeg varsa mp3'e çevirir; yoksa orijinal ses uzantısını bırakır
 - Proxy: YTDLP_PROXY/HTTPS_PROXY/HTTP_PROXY/PROXY desteği
+- PRG: Başarılı POST sonrası /done sayfasına redirect; form temiz gelir
 """
 
 import os
 import shutil
+import time
 from typing import Optional, Dict, Any, List, Tuple
 
-from flask import Flask, request, send_from_directory, render_template_string, jsonify
+from flask import (
+    Flask, request, send_from_directory, render_template_string,
+    jsonify, redirect, url_for
+)
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 DOWNLOAD_DIR = os.path.abspath(os.environ.get("DOWNLOAD_DIR", "/var/data"))
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Proxy env
 PROXY = (
     os.environ.get("YTDLP_PROXY")
     or os.environ.get("HTTPS_PROXY")
@@ -94,10 +98,11 @@ def ensure_cookiefile() -> Optional[str]:
     print("[cookie] not found")
     return None
 
-def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
+def build_opts(*, player_clients: str, cookiefile: Optional[str] = None,
+               proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
     """
-    Build yt-dlp options. 'player_clients' MUST be a comma-separated string like "web,android,tv".
-    Using keyword-only args prevents accidental positional misuse.
+    yt-dlp options builder — keyword-only args.
+    player_clients MUST be a CSV string like "web,android,tv".
     """
     assert isinstance(player_clients, str), "player_clients must be a comma-separated string"
     opts: Dict[str, Any] = {
@@ -111,7 +116,7 @@ def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: 
         "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
         "socket_timeout": 30,
-        "http_chunk_size": 1048576,  # 1MB
+        "http_chunk_size": 1048576,
         "source_address": "0.0.0.0",
         "http_headers": {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -119,7 +124,7 @@ def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: 
         },
         "extractor_args": {
             "youtube": {
-                "player_client": player_clients,  # STRING -> yt-dlp can split internally
+                "player_client": player_clients,  # STRING (yt-dlp split edebilir)
                 "skip": ["configs"],
             }
         },
@@ -207,17 +212,18 @@ def run_download(url: str) -> str:
         except Exception as e:
             last_err = e
             print(f"❌ Strateji {idx} başarısız: {e}")
+            low = str(e).lower()
+            if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
+                time.sleep(3)  # anti-bot baskısını azaltmak için kısa bekleme
 
-    # all failed
     msg = str(last_err) if last_err else "Bilinmeyen hata"
     low = msg.lower()
     hint = ""
     if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-        hint = ("\nİpucu: cookies.txt'yi güncelleyin (oturum açık profilden export) "
-                "ve gerekiyorsa YTDLP_PROXY ile residential proxy tanımlayın.")
+        hint = ("\nİpucu: cookies.txt'yi güncelleyin ve/veya YTDLP_PROXY ile residential proxy kullanın.")
     raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {msg}{hint}")
 
-# ---------- flask ----------
+# ---------- flask (PRG dahil) ----------
 
 @app.get("/health")
 def health():
@@ -225,23 +231,31 @@ def health():
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    msg = None
-    filename = None
-    url = ""
-    if request.method == "POST":
-        url = (request.form.get("url") or "").strip()
-        up = request.files.get("cookies")
-        if up and up.filename:
-            up.save("/tmp/cookies.txt")
-            print("[cookie] uploaded -> /tmp/cookies.txt")
+    # GET: form boş
+    if request.method == "GET":
+        return render_template_string(HTML, msg=None, filename=None, url="")
 
-        try:
-            filename = run_download(url)
-            msg = "✅ İndirme tamamlandı."
-        except Exception as e:
-            msg = f"❌ İndirme Hatası: {e}"
+    # POST: indir, sonra /done'a redirect (PRG)
+    url = (request.form.get("url") or "").strip()
+    up = request.files.get("cookies")
+    if up and up.filename:
+        up.save("/tmp/cookies.txt")
+        print("[cookie] uploaded -> /tmp/cookies.txt")
 
-    return render_template_string(HTML, msg=msg, filename=filename, url=url)
+    try:
+        filename = run_download(url)
+        return redirect(url_for("done", filename=filename))
+    except Exception as e:
+        msg = f"❌ İndirme Hatası: {e}"
+        # Hata durumunda formu, girilen URL ile tekrar göster (debug için)
+        return render_template_string(HTML, msg=msg, filename=None, url=url), 400
+
+@app.get("/done")
+def done():
+    filename = request.args.get("filename")
+    msg = "✅ İndirme tamamlandı."
+    # Form boş döner, sadece mesaj + indirme linki görünür
+    return render_template_string(HTML, msg=msg, filename=filename, url="")
 
 @app.route("/download/<path:filename>")
 def download(filename):
