@@ -1,24 +1,32 @@
 FROM python:3.11-slim
 
-# Environment
+# Daha temiz loglar
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    DOWNLOAD_DIR=/var/data
+    PYTHONUNBUFFERED=1
 
-# System dependencies
+# MP3 dönüşümü için ffmpeg
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg \
- && rm -rf /var/lib/apt/lists/* \
- && mkdir -p /var/data
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Python dependencies
+# Bağımlılıklar
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --break-system-packages -r requirements.txt
 
-# App
+# Uygulama
 COPY app.py .
 
-# Run
-CMD gunicorn -b 0.0.0.0:$PORT --timeout 120 app:app
+# İndirilen dosyalar için kalıcı disk
+ENV DOWNLOAD_DIR=/var/data
+
+# Dayanıklı Gunicorn ayarları (Render $PORT’u otomatik verir)
+CMD ["bash","-lc","gunicorn app:app \
+  --bind 0.0.0.0:$PORT \
+  --workers 1 \
+  --threads 2 \
+  --timeout 300 \
+  --graceful-timeout 30 \
+  --keep-alive 75 \
+  --log-level info"]

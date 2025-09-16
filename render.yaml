@@ -2,15 +2,26 @@ services:
   - type: web
     name: yt-mp3-flask
     env: docker
-    plan: free
+    plan: free            # ihtiyaca göre starter/pro da seçebilirsin
     autoDeploy: true
+    healthCheckPath: /health
+
+    # Kalıcı depolama (indirilenler burada)
     disk:
       name: downloads
       mountPath: /var/data
       sizeGB: 5
+
+    # YouTube oturum çerezleri (Netscape formatında cookies.txt)
     secretFiles:
       - name: cookies.txt
         mountPath: /etc/secrets/cookies.txt
+
+    # Opsiyonel env değişkenleri
     envVars:
-      - key: YTDLP_PROXY
-        value: ""   # optional: http(s)://user:pass@host:port
+      - key: WEB_CONCURRENCY
+        value: "1"
+      - key: THREADS
+        value: "2"
+      - key: YTDLP_PROXY        # gerekiyorsa residential proxy
+        value: ""               # örn: http://kullanici:parola@host:port
