@@ -8,14 +8,13 @@ Render-friendly Flask app: YouTube → MP3 with yt-dlp
 - Format seçimi: önce probe, en iyi gerçek ses formatını seç, sonra indir
 - MP3: FFmpeg varsa mp3'e çevirir; yoksa orijinal ses uzantısı kalır
 - Proxy: YTDLP_PROXY/HTTPS_PROXY/HTTP_PROXY/PROXY desteği
-- PRG: Başarılı indirme sonrası redirect → form temiz gelir
 """
 
 import os
 import shutil
 from typing import Optional, Dict, Any, List, Tuple
 
-from flask import Flask, request, send_from_directory, render_template_string, jsonify, redirect, url_for
+from flask import Flask, request, send_from_directory, render_template_string, jsonify
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
@@ -218,7 +217,7 @@ def run_download(url: str) -> str:
                 "ve gerekiyorsa YTDLP_PROXY ile residential proxy tanımlayın.")
     raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {msg}{hint}")
 
-# ---------- flask (PRG dâhil) ----------
+# ---------- flask ----------
 
 @app.get("/health")
 def health():
@@ -226,31 +225,23 @@ def health():
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # GET: form boş gelsin
-    if request.method == "GET":
-        return render_template_string(HTML, msg=None, filename=None, url="")
+    msg = None
+    filename = None
+    url = ""
+    if request.method == "POST":
+        url = (request.form.get("url") or "").strip()
+        up = request.files.get("cookies")
+        if up and up.filename:
+            up.save("/tmp/cookies.txt")
+            print("[cookie] uploaded -> /tmp/cookies.txt")
 
-    # POST: indir, sonra /done'a redirect (form sıfırlansın)
-    url = (request.form.get("url") or "").strip()
-    up = request.files.get("cookies")
-    if up and up.filename:
-        up.save("/tmp/cookies.txt")
-        print("[cookie] uploaded -> /tmp/cookies.txt")
+        try:
+            filename = run_download(url)
+            msg = "✅ İndirme tamamlandı."
+        except Exception as e:
+            msg = f"❌ İndirme Hatası: {e}"
 
-    try:
-        filename = run_download(url)
-        return redirect(url_for("done", filename=filename))
-    except Exception as e:
-        msg = f"❌ İndirme Hatası: {e}"
-        # Hata durumunda formu, girilen URL ile tekrar göster (debug kolaylığı için)
-        return render_template_string(HTML, msg=msg, filename=None, url=url), 400
-
-@app.get("/done")
-def done():
-    filename = request.args.get("filename")
-    msg = "✅ İndirme tamamlandı."
-    # Form temiz (url boş), üstte mesaj + indirme butonu görünsün
-    return render_template_string(HTML, msg=msg, filename=filename, url="")
+    return render_template_string(HTML, msg=msg, filename=filename, url=url)
 
 @app.route("/download/<path:filename>")
 def download(filename):
