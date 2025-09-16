@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-Render-friendly Flask app: YouTube → MP3 with yt-dlp
-
-- Cookies: upload via UI (/tmp/cookies.txt) or mount Secret File at /etc/secrets/cookies.txt
-- Format seçimi: önce formatları listeler, gerçekten var olan en iyi ses formatını seçer (m4a > webm/opus > diğer)
-- Fallback: farklı YouTube client sıralamalarını (web/android/tv/ios) dener
-- MP3: FFmpeg varsa mp3'e çevirir, yoksa orijinal ses uzantısını bırakır
-- Proxy: YTDLP_PROXY / HTTPS_PROXY / HTTP_PROXY / PROXY ile residential proxy desteği
+Enhanced YouTube MP3 Downloader with Anti-Bot Protection
+- Multiple bypass strategies
+- Advanced client rotation
+- Proxy support
+- Cookie validation
 """
 import os
 import shutil
 import re
+import time
+import random
 from typing import Optional, Dict, Any, List, Tuple
 
 from flask import Flask, request, send_from_directory, render_template_string, jsonify
@@ -28,13 +28,22 @@ PROXY = (
     or os.environ.get("PROXY")
 )
 
+# Anti-bot user agents
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:121.0) Gecko/20100101 Firefox/121.0",
+]
+
 # ---------------- HTML ------------------
 HTML = r"""<!doctype html>
 <html lang="tr">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>YouTube → MP3</title>
+  <title>YouTube → MP3 (Anti-Bot Korumalı)</title>
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;
          max-width:780px;margin:32px auto;padding:0 16px;line-height:1.5}
@@ -43,50 +52,120 @@ HTML = r"""<!doctype html>
     input[type=file]{flex:1}
     button{padding:10px 16px;border:0;border-radius:10px;background:#000;color:#fff;cursor:pointer}
     .msg{margin-top:14px;white-space:pre-wrap}
+    .error{color:#d32f2f;background:#ffebee;padding:12px;border-radius:8px}
+    .success{color:#388e3c;background:#e8f5e8;padding:12px;border-radius:8px}
     a.btn{display:inline-block;margin-top:8px;padding:8px 12px;background:#0a7;color:#fff;border-radius:8px;text-decoration:none}
     .note{margin-top:16px;font-size:.95em;color:#777}
+    .warning{background:#fff3cd;color:#856404;padding:12px;border-radius:8px;margin:10px 0}
     code{background:#eee;padding:1px 5px;border-radius:6px}
+    .status{margin:10px 0;padding:8px;background:#f8f9fa;border-left:4px solid #007bff;border-radius:4px}
   </style>
 </head>
 <body>
-  <h2>YouTube → MP3</h2>
+  <h2>🛡️ YouTube → MP3 (Anti-Bot Korumalı)</h2>
+  
+  {% if cookie_status %}
+  <div class="status">
+    <strong>Cookie Durumu:</strong> {{ cookie_status }}
+  </div>
+  {% endif %}
+  
   <form method="post" enctype="multipart/form-data">
     <input type="text" name="url" placeholder="https://www.youtube.com/watch?v=..." value="{{url or ''}}" required>
     <div class="row">
       <input type="file" name="cookies" accept=".txt">
-      <button type="submit">İndir</button>
+      <button type="submit">🚀 Anti-Bot İndir</button>
     </div>
   </form>
-  {% if msg %}<div class="msg">{{ msg|safe }}</div>{% endif %}
-  {% if filename %}
-    <p class="msg">✅ Hazır: <a class="btn" href="/download/{{ filename }}">Dosyayı indir</a></p>
+  
+  {% if msg %}
+    <div class="msg {{ 'error' if 'Hata' in msg else ('success' if '✅' in msg else '') }}">{{ msg|safe }}</div>
   {% endif %}
+  
+  {% if filename %}
+    <p class="success">✅ Hazır: <a class="btn" href="/download/{{ filename }}">📥 Dosyayı İndir</a></p>
+  {% endif %}
+  
+  <div class="warning">
+    <strong>⚠️ YouTube Bot Koruması Aktif!</strong><br>
+    Eğer indirme başarısız oluyorsa:
+    <ol>
+      <li><strong>Güncel Cookie:</strong> Chrome'dan güncel cookies.txt yükleyin</li>
+      <li><strong>VPN:</strong> Farklı ülke konumu deneyin</li>
+      <li><strong>Bekleme:</strong> Bir süre bekleyip tekrar deneyin</li>
+    </ol>
+  </div>
+  
   <div class="note">
-    Not: FFmpeg varsa MP3'e dönüştürülür; yoksa m4a/webm kalır.<br>
-    ⚠ Yalnızca hak sahibi olduğunuz içerikleri indirin. YouTube kullanım şartlarına uyun.
+    <strong>Cookie Nasıl Alınır:</strong><br>
+    1. Chrome'da YouTube'a giriş yapın<br>
+    2. F12 → Application → Cookies → youtube.com<br>
+    3. Tüm cookie'leri kopyalayıp .txt dosyası yapın<br>
+    <br>
+    <strong>Ya da:</strong> <code>yt-dlp --cookies-from-browser chrome</code> ile otomatik alın
   </div>
 </body>
 </html>
 """
 
-# ---------------- UTILS -----------------
+# ---------------- ENHANCED UTILS -----------------
 def ffmpeg_available() -> bool:
-    """Check if FFmpeg is available in system PATH"""
+    """Check if FFmpeg is available"""
     return shutil.which("ffmpeg") is not None
 
 def is_valid_youtube_url(url: str) -> bool:
-    """Validate if URL is a valid YouTube URL"""
+    """Validate YouTube URL"""
     youtube_regex = re.compile(
         r'(https?://)?(www\.)?(youtube|youtu|youtube-nocookie)\.(com|be)/'
         r'(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})'
     )
     return bool(youtube_regex.match(url))
 
-def ensure_cookiefile() -> Optional[str]:
-    """Find and prepare cookie file"""
+def validate_cookies(cookiefile: str) -> Tuple[bool, str]:
+    """Validate cookie file content and freshness"""
+    if not os.path.exists(cookiefile):
+        return False, "Cookie dosyası bulunamadı"
+    
+    try:
+        with open(cookiefile, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Check if it's a valid Netscape format
+        if not content.strip().startswith('# Netscape HTTP Cookie File'):
+            return False, "Geçersiz cookie formatı"
+        
+        # Count valid cookies
+        lines = content.split('\n')
+        valid_cookies = 0
+        for line in lines:
+            if line.strip() and not line.startswith('#'):
+                parts = line.split('\t')
+                if len(parts) >= 7 and 'youtube.com' in parts[0]:
+                    valid_cookies += 1
+        
+        if valid_cookies == 0:
+            return False, "YouTube cookie'leri bulunamadı"
+        
+        # Check file age
+        age_hours = (time.time() - os.path.getmtime(cookiefile)) / 3600
+        if age_hours > 24:
+            return True, f"⚠️ Cookie eski ({int(age_hours)} saat) - yenilemek önerilir"
+        
+        return True, f"✅ Geçerli ({valid_cookies} cookie, {int(age_hours)}h eski)"
+        
+    except Exception as e:
+        return False, f"Cookie okuma hatası: {e}"
+
+def ensure_cookiefile() -> Tuple[Optional[str], str]:
+    """Find and validate cookie file"""
     tmp = "/tmp/cookies.txt"
+    status = "Cookie bulunamadı"
+    
     if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-        return tmp
+        is_valid, msg = validate_cookies(tmp)
+        if is_valid:
+            return tmp, msg
+        status = f"Geçersiz cookie: {msg}"
     
     candidates = [
         os.environ.get("YTDLP_COOKIES"),
@@ -100,30 +179,75 @@ def ensure_cookiefile() -> Optional[str]:
         if src and os.path.exists(src) and os.path.getsize(src) > 0:
             try:
                 shutil.copyfile(src, tmp)
-                return tmp
+                is_valid, msg = validate_cookies(tmp)
+                if is_valid:
+                    return tmp, msg
+                status = f"Geçersiz cookie: {msg}"
             except Exception as e:
-                print(f"Cookie dosyası kopyalama hatası: {e}")
+                print(f"Cookie kopyalama hatası: {e}")
     
-    return None
+    return None, status
 
-def common_opts(client_order: List[str], cookiefile: Optional[str]) -> Dict[str, Any]:
-    """Create common yt-dlp options"""
+def get_random_user_agent() -> str:
+    """Get random user agent for anti-bot"""
+    return random.choice(USER_AGENTS)
+
+def common_opts(client_order: List[str], cookiefile: Optional[str], bypass_mode: bool = False) -> Dict[str, Any]:
+    """Enhanced yt-dlp options with anti-bot measures"""
+    user_agent = get_random_user_agent()
+    
     opts: Dict[str, Any] = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
-        "no_warnings": True,
+        "no_warnings": False,  # Enable warnings for debugging
         "cachedir": False,
-        "retries": 3,
+        "retries": 5,
+        "fragment_retries": 10,
         "nocheckcertificate": True,
-        "extractor_args": {"youtube": {"player_client": client_order, "skip": ["configs"]}},
-        "geo_bypass_country": "TR",
+        
+        # Anti-bot headers
+        "http_headers": {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+        },
+        
+        # Enhanced extractor args
+        "extractor_args": {
+            "youtube": {
+                "player_client": client_order,
+                "skip": ["configs", "webpage"] if bypass_mode else ["configs"],
+                "player_skip": ["webpage"] if bypass_mode else [],
+            }
+        },
+        
+        # Geo bypass
+        "geo_bypass": True,
+        "geo_bypass_country": ["US", "GB", "DE", "CA"],
+        
+        # Sleep between requests
+        "sleep_interval": random.uniform(1, 3),
+        "max_sleep_interval": 5,
+        
+        # Additional anti-bot measures
+        "extractor_retries": 3,
+        "file_access_retries": 3,
     }
     
-    if PROXY: 
+    # Add proxy if available
+    if PROXY:
         opts["proxy"] = PROXY
-    if cookiefile: 
+    
+    # Add cookies if available
+    if cookiefile and os.path.exists(cookiefile):
         opts["cookiefile"] = cookiefile
+    
+    # FFmpeg postprocessor
     if ffmpeg_available():
         opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
@@ -134,77 +258,121 @@ def common_opts(client_order: List[str], cookiefile: Optional[str]) -> Dict[str,
     return opts
 
 def choose_format(info: Dict[str, Any]) -> str:
-    """Choose best audio format from available formats"""
+    """Enhanced format selection"""
     fmts = info.get("formats") or []
     candidates: List[Tuple[float, Dict[str, Any]]] = []
     
     for f in fmts:
         acodec, vcodec = f.get("acodec"), f.get("vcodec")
-        if not acodec or acodec == "none": 
+        if not acodec or acodec == "none":
             continue
             
         is_audio_only = (vcodec in (None, "none"))
         abr = f.get("abr") or f.get("tbr") or 0
         ext = (f.get("ext") or "").lower()
         
-        # Scoring: m4a preferred, audio-only preferred, higher bitrate preferred
-        ext_bonus = 20 if ext == "m4a" else (10 if ext == "webm" else 0)
-        score = abr + (60 if is_audio_only else 0) + ext_bonus
+        # Prefer higher quality audio-only formats
+        ext_bonus = {
+            "m4a": 30,
+            "aac": 25, 
+            "webm": 20,
+            "opus": 15,
+            "mp3": 10,
+        }.get(ext, 0)
+        
+        score = abr + (100 if is_audio_only else 0) + ext_bonus
         candidates.append((score, f))
     
-    if not candidates: 
+    if not candidates:
         return "bestaudio/best"
     
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1].get("format_id") or "bestaudio/best"
 
-def clean_filename(filename: str) -> str:
-    """Clean filename for safe filesystem usage"""
-    # Remove or replace problematic characters
-    filename = re.sub(r'[<>:"/\\|?*]', '_', filename)
-    filename = re.sub(r'[\x00-\x1f]', '', filename)  # Remove control characters
-    return filename.strip()
-
 def run_download(url: str) -> str:
-    """Download video and return filename"""
+    """Enhanced download with multiple anti-bot strategies"""
     if not url.strip():
         raise ValueError("URL boş olamaz.")
     
     if not is_valid_youtube_url(url):
         raise ValueError("Geçerli bir YouTube URL'si giriniz.")
     
-    cookie = ensure_cookiefile()
+    cookie, cookie_status = ensure_cookiefile()
+    print(f"Cookie durumu: {cookie_status}")
     
-    # Different client order strategies
-    orders = (
-        [["web","android","tv"],["android","web","tv"],["ios","android","tv","web"]]
-        if cookie else
-        [["android","tv","web"],["web","android","tv"],["ios","android","tv","web"]]
-    )
+    # Multiple strategy attempts
+    strategies = [
+        # Strategy 1: Cookie-based with web client
+        {
+            "clients": ["web", "android", "tv"],
+            "bypass": False,
+            "name": "Cookie + Web Client"
+        },
+        # Strategy 2: Mobile clients without cookies
+        {
+            "clients": ["android", "ios", "tv"],
+            "bypass": False,
+            "name": "Mobile Clients",
+            "force_no_cookie": True
+        },
+        # Strategy 3: TV client with bypass mode
+        {
+            "clients": ["tv", "android"],
+            "bypass": True,
+            "name": "TV Client Bypass"
+        },
+        # Strategy 4: iOS client only
+        {
+            "clients": ["ios"],
+            "bypass": True,
+            "name": "iOS Client Only"
+        },
+        # Strategy 5: All clients with maximum bypass
+        {
+            "clients": ["mweb", "tv", "android", "ios"],
+            "bypass": True,
+            "name": "All Clients Bypass"
+        }
+    ]
     
     last_err = None
     
-    for order in orders:
+    for i, strategy in enumerate(strategies, 1):
         try:
-            # First, extract info without downloading
-            opts_probe = common_opts(order, cookie)
+            print(f"Strateji {i}/{len(strategies)}: {strategy['name']}")
+            
+            # Use cookie unless explicitly disabled
+            use_cookie = cookie if not strategy.get("force_no_cookie") else None
+            
+            # Add random delay between attempts
+            if i > 1:
+                time.sleep(random.uniform(2, 5))
+            
+            # Extract info first
+            opts_probe = common_opts(
+                strategy["clients"], 
+                use_cookie, 
+                strategy["bypass"]
+            )
+            
             with YoutubeDL(opts_probe) as y1:
                 info = y1.extract_info(url, download=False)
                 
                 if not info:
-                    raise DownloadError("Video bilgisi alınamadı.")
+                    raise DownloadError("Video bilgisi alınamadı")
                 
                 if info.get("is_live"):
-                    raise DownloadError("Canlı yayın desteklenmiyor.")
+                    raise DownloadError("Canlı yayın desteklenmiyor")
                 
-                # Choose best format
+                # Choose format
                 fmt = choose_format(info)
+                print(f"Seçilen format: {fmt}")
             
-            # Now download with chosen format
+            # Download with chosen format
             opts_dl = dict(opts_probe)
             opts_dl["format"] = fmt
             
-            # Track files before download
+            # Track files
             before = set(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else set()
             
             with YoutubeDL(opts_dl) as y2:
@@ -213,56 +381,57 @@ def run_download(url: str) -> str:
             # Find new files
             after = set(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else set()
             new_files = sorted(
-                after - before, 
-                key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)), 
+                after - before,
+                key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)),
                 reverse=True
             )
             
             if new_files:
+                print(f"✅ Başarılı: {strategy['name']}")
                 return new_files[0]
             
-            # Fallback: construct expected filename
-            title = clean_filename(info.get('title', 'audio'))
-            ext = 'mp3' if ffmpeg_available() else (info.get('ext', 'm4a'))
-            expected_filename = f"{title}.{ext}"
-            
-            # Check if file exists with expected name
-            if os.path.exists(os.path.join(DOWNLOAD_DIR, expected_filename)):
-                return expected_filename
-            
-            # If still not found, return the first file that might match
-            all_files = os.listdir(DOWNLOAD_DIR) if os.path.exists(DOWNLOAD_DIR) else []
-            for f in sorted(all_files, key=lambda x: os.path.getmtime(os.path.join(DOWNLOAD_DIR, x)), reverse=True):
-                if title[:20] in f or f.endswith(('.mp3', '.m4a', '.webm', '.opus')):
-                    return f
-            
-            raise DownloadError("Dosya indirme tamamlandı ancak dosya bulunamadı.")
+            raise DownloadError("Dosya oluşturulamadı")
             
         except Exception as e:
             last_err = e
-            print(f"İndirme denemesi başarısız ({order}): {e}")
+            print(f"❌ Strateji {i} başarısız: {e}")
+            continue
     
-    # If all attempts failed
+    # All strategies failed
     error_msg = str(last_err) if last_err else "Bilinmeyen hata"
-    raise RuntimeError(f"Tüm indirme denemeleri başarısız: {error_msg}")
+    if "Sign in to confirm" in error_msg:
+        raise RuntimeError(
+            "🤖 YouTube bot koruması aktif!\n\n"
+            "Çözümler:\n"
+            "1. Güncel cookie dosyası yükleyin\n"
+            "2. VPN kullanarak farklı ülkeden deneyin\n"
+            "3. Birkaç dakika bekleyip tekrar deneyin\n"
+            "4. YouTube'a giriş yapıp cookie'leri yenileyin"
+        )
+    
+    raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {error_msg}")
 
-# ---------------- FLASK -----------------
+# ---------------- FLASK APP -----------------
 app = Flask(__name__)
 
 @app.get("/health")
 def health():
-    """Health check endpoint"""
+    """Enhanced health check"""
+    cookie, cookie_status = ensure_cookiefile()
     return jsonify({
         "ok": True,
         "ffmpeg": ffmpeg_available(),
         "download_dir": DOWNLOAD_DIR,
-        "proxy": bool(PROXY)
+        "proxy": bool(PROXY),
+        "cookie_status": cookie_status,
+        "user_agents": len(USER_AGENTS)
     })
 
 @app.route("/", methods=["GET", "POST"])
 def index():
-    """Main route for downloading"""
+    """Main route with enhanced error handling"""
     msg, filename, url = None, None, ""
+    cookie, cookie_status = ensure_cookiefile()
     
     if request.method == "POST":
         url = (request.form.get("url") or "").strip()
@@ -272,7 +441,8 @@ def index():
         if file and file.filename and file.filename.endswith('.txt'):
             try:
                 file.save("/tmp/cookies.txt")
-                print("Cookie dosyası yüklendi.")
+                cookie, cookie_status = ensure_cookiefile()  # Re-validate
+                print("Cookie dosyası yüklendi ve doğrulandı")
             except Exception as e:
                 print(f"Cookie dosyası yükleme hatası: {e}")
         
@@ -280,15 +450,21 @@ def index():
         if url:
             try:
                 filename = run_download(url)
-                msg = "✅ İndirme tamamlandı."
+                msg = "✅ İndirme tamamlandı! Anti-bot koruması aşıldı."
                 print(f"İndirme başarılı: {filename}")
             except Exception as e:
-                msg = f"❌ İndirme Hatası: {e}"
+                msg = f"❌ İndirme Hatası:\n{e}"
                 print(f"İndirme hatası: {e}")
         else:
             msg = "❌ URL giriniz."
     
-    return render_template_string(HTML, msg=msg, filename=filename, url=url)
+    return render_template_string(
+        HTML, 
+        msg=msg, 
+        filename=filename, 
+        url=url,
+        cookie_status=cookie_status
+    )
 
 @app.route("/download/<path:filename>")
 def download(filename):
@@ -302,8 +478,13 @@ def download(filename):
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
-    print(f"Starting server on port {port}")
-    print(f"Download directory: {DOWNLOAD_DIR}")
-    print(f"FFmpeg available: {ffmpeg_available()}")
-    print(f"Proxy configured: {bool(PROXY)}")
+    print("🛡️ Enhanced Anti-Bot YouTube MP3 Downloader Starting...")
+    print(f"📁 Download directory: {DOWNLOAD_DIR}")
+    print(f"🎵 FFmpeg available: {ffmpeg_available()}")
+    print(f"🌐 Proxy configured: {bool(PROXY)}")
+    print(f"🔧 User agents: {len(USER_AGENTS)}")
+    
+    cookie, status = ensure_cookiefile()
+    print(f"🍪 Cookie status: {status}")
+    
     app.run(host="0.0.0.0", port=port, debug=False)
