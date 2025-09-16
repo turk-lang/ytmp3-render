@@ -192,69 +192,53 @@ def get_random_user_agent() -> str:
     """Get random user agent for anti-bot"""
     return random.choice(USER_AGENTS)
 
-def common_opts(client_order: List[str], cookiefile: Optional[str], bypass_mode: bool = False) -> Dict[str, Any]:
-    """Enhanced yt-dlp options with anti-bot measures"""
-    user_agent = get_random_user_agent()
-    
+def common_opts(client_order: List[str], cookiefile: Optional[str]) -> Dict[str, Any]:
+    """Build a safe yt-dlp options dict without 'format' (set later)."""
+    # Ensure player_client is a string if yt-dlp expects that internally
+    player_client_val = client_order
+    if isinstance(client_order, (list, tuple)):
+        # join with comma -> compatible with implementations that call split()
+        player_client_val = ",".join(client_order)
+
     opts: Dict[str, Any] = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
-        "no_warnings": False,  # Enable warnings for debugging
+        "no_warnings": True,
         "cachedir": False,
-        "retries": 5,
-        "fragment_retries": 10,
+        "retries": 3,
+        "fragment_retries": 3,
+        "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
-        
-        # Anti-bot headers
+        "source_address": "0.0.0.0",
         "http_headers": {
-            "User-Agent": user_agent,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Accept-Encoding": "gzip, deflate",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            ),
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         },
-        
-        # Enhanced extractor args
         "extractor_args": {
             "youtube": {
-                "player_client": client_order,
-                "skip": ["configs", "webpage"] if bypass_mode else ["configs"],
-                "player_skip": ["webpage"] if bypass_mode else [],
+                "player_client": player_client_val,
+                "skip": ["configs"],
             }
         },
-        
-        # Geo bypass
-        "geo_bypass": True,
-        "geo_bypass_country": ["US", "GB", "DE", "CA"],
-        
-        # Sleep between requests
-        "sleep_interval": random.uniform(1, 3),
-        "max_sleep_interval": 5,
-        
-        # Additional anti-bot measures
-        "extractor_retries": 3,
-        "file_access_retries": 3,
+        "geo_bypass_country": "TR",
     }
-    
-    # Add proxy if available
     if PROXY:
         opts["proxy"] = PROXY
-    
-    # Add cookies if available
-    if cookiefile and os.path.exists(cookiefile):
+    if cookiefile:
         opts["cookiefile"] = cookiefile
-    
-    # FFmpeg postprocessor
     if ffmpeg_available():
         opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
         }]
-    
+    # socket and http retry tuning (helps prevent worker timeouts)
+    opts["socket_timeout"] = 30
+    opts["http_chunk_size"] = 1048576
     return opts
 
 def choose_format(info: Dict[str, Any]) -> str:
