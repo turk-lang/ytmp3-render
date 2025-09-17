@@ -9,7 +9,6 @@ Render-friendly Flask app: YouTube → MP3 with yt-dlp
 - MP3: FFmpeg varsa mp3'e çevirir; yoksa orijinal ses uzantısı kalır
 - Proxy: YTDLP_PROXY/HTTPS_PROXY/HTTP_PROXY/PROXY desteği
 - PRG: Başarılı indirme sonrası redirect → form temiz gelir
-- Auto-redirect: Dosya indirme sonrası otomatik ana sayfaya dönüş
 """
 
 import os
@@ -50,7 +49,6 @@ HTML = r"""<!doctype html>
     a.btn{display:inline-block;margin-top:8px;padding:8px 12px;background:#0a7;color:#fff;border-radius:8px;text-decoration:none}
     .note{margin-top:16px;font-size:.95em;color:#777}
     code{background:#eee;padding:1px 5px;border-radius:6px}
-    .countdown{font-size:0.9em;color:#666;margin-top:8px}
   </style>
 </head>
 <body>
@@ -64,42 +62,10 @@ HTML = r"""<!doctype html>
   </form>
   {% if msg %}<div class="msg">{{ msg|safe }}</div>{% endif %}
   {% if filename %}
-    <p class="msg">✅ Hazır: <a class="btn" href="#" onclick="downloadAndRedirect('/download/{{ filename }}', '{{ filename }}')">Dosyayı indir</a></p>
-    <div class="countdown" id="countdown"></div>
-    <script>
-      function downloadAndRedirect(url, filename) {
-        // Dosyayı indir
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        
-        // 3 saniye sonra ana sayfaya yönlendir
-        let seconds = 3;
-        const countdownEl = document.getElementById('countdown');
-        
-        const updateCountdown = () => {
-          if (seconds > 0) {
-            countdownEl.textContent = `${seconds} saniye sonra ana sayfaya dönülecek...`;
-            seconds--;
-            setTimeout(updateCountdown, 1000);
-          } else {
-            window.location.href = '/';
-          }
-        };
-        
-        updateCountdown();
-      }
-    </script>
+    <p class="msg">✅ Hazır: <a class="btn" href="/download/{{ filename }}">Dosyayı indir</a></p>
   {% endif %}
   <div class="note">
     Not: FFmpeg varsa MP3'e dönüştürülür; yoksa m4a/webm kalır. Yalnızca hak sahibi olduğunuz içerikleri indirin.
-    <br><br>
-    <strong>Bot hatası alıyorsanız:</strong>
-    <br>• Chrome'da YouTube'a giriş yapın → F12 → Application → Cookies → youtube.com → tüm cookies'leri kopyalayıp cookies.txt dosyasına kaydedin
-    <br>• Environment variables: <code>YTDLP_PROXY</code>, <code>YTDLP_PO_TOKEN</code>, <code>YTDLP_VISITOR_DATA</code>
   </div>
 </body>
 </html>
@@ -132,71 +98,37 @@ def ensure_cookiefile() -> Optional[str]:
     print("[cookie] not found")
     return None
 
-def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True, use_po_token: bool = False) -> Dict[str, Any]:
+def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
     """
     Build yt-dlp options. 'player_clients' MUST be a comma-separated string like "web,android,tv".
     Using keyword-only args prevents accidental positional misuse.
     """
     assert isinstance(player_clients, str), "player_clients must be a comma-separated string"
-    
-    # Rotating User-Agents for better bot detection evasion
-    user_agents = [
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    ]
-    import random
-    selected_ua = random.choice(user_agents)
-    
     opts: Dict[str, Any] = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "cachedir": False,
-        "retries": 5,  # Increased retries
-        "fragment_retries": 5,
-        "concurrent_fragment_downloads": 2,  # Reduced to be less aggressive
+        "retries": 3,
+        "fragment_retries": 3,
+        "concurrent_fragment_downloads": 4,
         "nocheckcertificate": True,
-        "socket_timeout": 45,  # Increased timeout
-        "http_chunk_size": 524288,  # 512KB - smaller chunks
+        "socket_timeout": 30,
+        "http_chunk_size": 1048576,  # 1MB
         "source_address": "0.0.0.0",
-        "sleep_interval_requests": 1,  # Sleep between requests
-        "max_sleep_interval": 5,
         "http_headers": {
-            "User-Agent": selected_ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
-            "DNT": "1",
-            "Connection": "keep-alive",
-            "Upgrade-Insecure-Requests": "1",
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "none",
-            "Sec-Fetch-User": "?1",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
         },
         "extractor_args": {
             "youtube": {
-                "player_client": player_clients,
-                "skip": ["configs", "webpage"],  # Skip more potential detection points
-                "player_skip": ["js"],  # Skip JS player when possible
+                "player_client": player_clients,  # STRING -> yt-dlp can split internally
+                "skip": ["configs"],
             }
         },
-        "geo_bypass_country": "US",  # Changed from TR to US
-        "force_generic_extractor": False,
-        "no_check_formats": True,  # Skip format validation that might trigger detection
+        "geo_bypass_country": "TR",
     }
-    
-    # Add PO Token support if available (newest anti-bot bypass)
-    if use_po_token:
-        po_token = os.environ.get("YTDLP_PO_TOKEN")
-        visitor_data = os.environ.get("YTDLP_VISITOR_DATA")
-        if po_token and visitor_data:
-            opts["extractor_args"]["youtube"]["po_token"] = f"{po_token}:{visitor_data}"
-    
     if proxy:
         opts["proxy"] = proxy
     if cookiefile:
@@ -237,56 +169,29 @@ def run_download(url: str) -> str:
         raise ValueError("URL boş olamaz.")
     cookie = ensure_cookiefile()
 
-    # Enhanced strategies with more bypass techniques
     strategies = [
-        # Most effective strategies first
-        ("Cookie + Android Mobile", "android", True, True),  # (name, clients, use_po_token, delay)
-        ("Cookie + TV Client", "tv", True, True),
-        ("iOS + PO Token", "ios", True, True),
-        ("Android Only", "android", False, True),
-        ("TV Embedded Client", "tv_embedded", False, True),
-        ("Web + Mobile Combo", "web,android", False, True),
-        ("All Clients + PO", "web,android,tv,ios", True, False),
-        ("Fallback Mix", "mweb,android,tv", False, False),
+        ("Cookie + Web Client",      "web" if cookie else "web,android,tv"),
+        ("Mobile Clients",           "android,web,tv"),
+        ("TV Client Bypass",         "tv,android,web"),
+        ("iOS Client Only",          "ios"),
+        ("All Clients Bypass",       "web,android,tv,ios"),
     ]
 
     last_err = None
-    import time
 
-    for idx, (name, clients_str, use_po_token, add_delay) in enumerate(strategies, start=1):
+    for idx, (name, clients_str) in enumerate(strategies, start=1):
         print(f"Strateji {idx}/{len(strategies)}: {name} -> {clients_str}")
-        
-        if add_delay and idx > 1:
-            delay = min(2 * idx, 10)  # Progressive delay, max 10s
-            print(f"  🕒 {delay}s bekleniyor (anti-bot bypass)...")
-            time.sleep(delay)
-        
         try:
-            # 1) Probe with enhanced options
-            opts_probe = build_opts(
-                player_clients=clients_str, 
-                cookiefile=cookie, 
-                postprocess=False, 
-                use_po_token=use_po_token
-            )
-            
+            # 1) Probe
+            opts_probe = build_opts(player_clients=clients_str, cookiefile=cookie, postprocess=False)
             with YoutubeDL(opts_probe) as y1:
                 info = y1.extract_info(url, download=False)
                 if info.get("is_live"):
                     raise DownloadError("Canlı yayın desteklenmiyor.")
                 fmt = choose_format(info)
 
-            # Small delay between probe and download
-            if add_delay:
-                time.sleep(1)
-
-            # 2) Download with same enhanced options
-            opts_dl = build_opts(
-                player_clients=clients_str, 
-                cookiefile=cookie, 
-                postprocess=True, 
-                use_po_token=use_po_token
-            )
+            # 2) Download
+            opts_dl = build_opts(player_clients=clients_str, cookiefile=cookie, postprocess=True)
             opts_dl["format"] = fmt
 
             before = set(os.listdir(DOWNLOAD_DIR))
@@ -305,32 +210,15 @@ def run_download(url: str) -> str:
 
         except Exception as e:
             last_err = e
-            error_msg = str(e).lower()
-            
-            # Log specific error types for debugging
-            if "sign in to confirm" in error_msg or "bot" in error_msg:
-                print(f"❌ Strateji {idx} - Bot detection: {e}")
-            elif "private" in error_msg or "unavailable" in error_msg:
-                print(f"❌ Strateji {idx} - Video unavailable: {e}")
-                break  # No point trying other strategies for unavailable videos
-            else:
-                print(f"❌ Strateji {idx} - Diğer hata: {e}")
+            print(f"❌ Strateji {idx} başarısız: {e}")
 
-    # All failed - provide detailed error message
+    # all failed
     msg = str(last_err) if last_err else "Bilinmeyen hata"
     low = msg.lower()
-    
-    # Enhanced error hints
     hint = ""
     if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-        hint = ("\n\n🔧 Çözüm önerileri:"
-                "\n1. Cookies.txt dosyasını yükleyin (oturum açık Chrome'dan export)"
-                "\n2. YTDLP_PROXY environment variable ile residential proxy kullanın"
-                "\n3. YTDLP_PO_TOKEN ve YTDLP_VISITOR_DATA environment variables tanımlayın"
-                "\n4. Birkaç dakika bekleyip tekrar deneyin")
-    elif ("private" in low) or ("unavailable" in low):
-        hint = "\n\n❌ Video özel, kaldırılmış veya coğrafi olarak engellenimiş."
-    
+        hint = ("\nİpucu: cookies.txt'yi güncelleyin (oturum açık profilden export) "
+                "ve gerekiyorsa YTDLP_PROXY ile residential proxy tanımlayın.")
     raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {msg}{hint}")
 
 # ---------- flask (PRG) ----------
@@ -364,7 +252,7 @@ def index():
 def done():
     filename = request.args.get("filename")
     msg = "✅ İndirme tamamlandı."
-    # Form boş, sadece mesaj + indirme butonu + otomatik yönlendirme
+    # Form boş, sadece mesaj + indirme butonu
     return render_template_string(HTML, msg=msg, filename=filename, url="")
 
 @app.route("/download/<path:filename>")
