@@ -1,31 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 Render-friendly Flask app: YouTube → MP3 with yt-dlp
-
-- Cookies: UI upload (/tmp/cookies.txt) or Render Secret File (/etc/secrets/cookies.txt)
-- Player client uyumluluğu: player_client daima STRING ("web,android,tv") -> split() hatası yok
-- Strateji sıraları: web / android / tv / ios kombinasyonları
-- Format seçimi: önce probe, en iyi gerçek ses formatını seç, sonra indir
-- MP3: FFmpeg varsa mp3'e çevirir; yoksa orijinal ses uzantısı kalır
-- Proxy: YTDLP_PROXY/HTTPS_PROXY/HTTP_PROXY/PROXY desteği
-- PRG: Başarılı indirme sonrası redirect → form temiz gelir
+- Cookie varsa yalnızca WEB client stratejisi (anti-bot tetiklemesini azaltır)
+- Anti-bot hatasında kısa bekleme (3 sn)
+- /cookie_check: cookies.txt sağlığını hızlı kontrol
+- Başarılı indirme sonrası form sayfasına döner (link/mesaj göstermez)
 """
 
 import os
 import shutil
+import time
 from typing import Optional, Dict, Any, List, Tuple
 
-from flask import (
-    Flask, request, send_from_directory, render_template_string,
-    jsonify, redirect, url_for
-)
+from flask import Flask, request, send_from_directory, render_template_string, jsonify, redirect, url_for
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 DOWNLOAD_DIR = os.path.abspath(os.environ.get("DOWNLOAD_DIR", "/var/data"))
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Proxy env
 PROXY = (
     os.environ.get("YTDLP_PROXY")
     or os.environ.get("HTTPS_PROXY")
@@ -46,7 +39,6 @@ HTML = r"""<!doctype html>
     input[type=file]{flex:1}
     button{padding:10px 16px;border:0;border-radius:10px;background:#000;color:#fff;cursor:pointer}
     .msg{margin-top:14px;white-space:pre-wrap}
-    a.btn{display:inline-block;margin-top:8px;padding:8px 12px;background:#0a7;color:#fff;border-radius:8px;text-decoration:none}
     .note{margin-top:16px;font-size:.95em;color:#777}
     code{background:#eee;padding:1px 5px;border-radius:6px}
   </style>
@@ -61,9 +53,6 @@ HTML = r"""<!doctype html>
     </div>
   </form>
   {% if msg %}<div class="msg">{{ msg|safe }}</div>{% endif %}
-  {% if filename %}
-    <p class="msg">✅ Hazır: <a class="btn" href="/download/{{ filename }}">Dosyayı indir</a></p>
-  {% endif %}
   <div class="note">
     Not: FFmpeg varsa MP3'e dönüştürülür; yoksa m4a/webm kalır. Yalnızca hak sahibi olduğunuz içerikleri indirin.
   </div>
@@ -98,11 +87,8 @@ def ensure_cookiefile() -> Optional[str]:
     print("[cookie] not found")
     return None
 
-def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
-    """
-    Build yt-dlp options. 'player_clients' MUST be a comma-separated string like "web,android,tv".
-    Using keyword-only args prevents accidental positional misuse.
-    """
+def build_opts(*, player_clients: str, cookiefile: Optional[str] = None,
+               proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
     assert isinstance(player_clients, str), "player_clients must be a comma-separated string"
     opts: Dict[str, Any] = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
@@ -123,7 +109,7 @@ def build_opts(*, player_clients: str, cookiefile: Optional[str] = None, proxy: 
         },
         "extractor_args": {
             "youtube": {
-                "player_client": player_clients,  # STRING -> yt-dlp can split internally
+                "player_client": player_clients,  # STRING; yt-dlp gerektiğinde split eder
                 "skip": ["configs"],
             }
         },
@@ -147,8 +133,7 @@ def choose_format(info: Dict[str, Any]) -> str:
         return "bestaudio/best"
     candidates: List[Tuple[float, Dict[str, Any]]] = []
     for f in fmts:
-        acodec = f.get("acodec")
-        vcodec = f.get("vcodec")
+        acodec = f.get("acodec"); vcodec = f.get("vcodec")
         if not acodec or acodec == "none":
             continue
         is_audio_only = (vcodec in (None, "none"))
@@ -169,13 +154,14 @@ def run_download(url: str) -> str:
         raise ValueError("URL boş olamaz.")
     cookie = ensure_cookiefile()
 
-    strategies = [
-        ("Cookie + Web Client",      "web" if cookie else "web,android,tv"),
-        ("Mobile Clients",           "android,web,tv"),
-        ("TV Client Bypass",         "tv,android,web"),
-        ("iOS Client Only",          "ios"),
-        ("All Clients Bypass",       "web,android,tv,ios"),
-    ]
+    # Cookie varsa YALNIZCA web dene; yoksa mobil -> web iki adım dene
+    if cookie:
+        strategies = [("Cookie + Web Client", "web")]
+    else:
+        strategies = [
+            ("Mobile Clients", "android,web,tv"),
+            ("Web Only", "web"),
+        ]
 
     last_err = None
 
@@ -202,7 +188,7 @@ def run_download(url: str) -> str:
             if new_files:
                 return new_files[0]
 
-            # rare fallback
+            # çok nadir fallback
             title = (info.get("title") or "audio").strip()
             ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
             safe = "".join(c for c in f"{title}.{ext}" if c not in "\\/:*?\"<>|").strip()
@@ -211,49 +197,78 @@ def run_download(url: str) -> str:
         except Exception as e:
             last_err = e
             print(f"❌ Strateji {idx} başarısız: {e}")
+            low = str(e).lower()
+            if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
+                time.sleep(3)  # anti-bot baskısını yumuşat
 
-    # all failed
     msg = str(last_err) if last_err else "Bilinmeyen hata"
     low = msg.lower()
     hint = ""
     if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-        hint = ("\nİpucu: cookies.txt'yi güncelleyin (oturum açık profilden export) "
-                "ve gerekiyorsa YTDLP_PROXY ile residential proxy tanımlayın.")
+        hint = ("\nİpucu: cookies.txt'yi güncelleyin ve/veya YTDLP_PROXY ile residential sticky proxy kullanın.")
     raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {msg}{hint}")
 
-# ---------- flask (PRG) ----------
+# ---------- health & cookie check ----------
 
 @app.get("/health")
 def health():
     return jsonify(ok=True)
 
+@app.get("/cookie_check")
+def cookie_check():
+    path = "/tmp/cookies.txt"
+    if not os.path.exists(path):
+        secret_path = "/etc/secrets/cookies.txt"
+        if os.path.exists(secret_path):
+            try:
+                shutil.copyfile(secret_path, path)
+            except Exception:
+                pass
+    if not os.path.exists(path):
+        return jsonify(ok=False, reason="cookies.txt yok"), 404
+
+    lines = []
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        for l in f:
+            l = l.strip()
+            if l and not l.startswith("#"):
+                lines.append(l)
+
+    keys_present = set()
+    for l in lines:
+        parts = l.split()
+        if len(parts) >= 7:
+            keys_present.add(parts[5])
+
+    required = {"SID", "__Secure-3PSID", "SAPISID", "APISID", "HSID", "SSID", "CONSENT"}
+    return jsonify(
+        ok=True,
+        total_lines=len(lines),
+        youtube_domain_lines=sum(1 for l in lines if "youtube.com" in l or ".youtube." in l),
+        required_found=sorted(list(required & keys_present)),
+        missing=sorted(list(required - keys_present)),
+    )
+
+# ---------- flask (PRG) ----------
+
 @app.route("/", methods=["GET", "POST"])
 def index():
-    # GET: form temiz gelsin
-    if request.method == "GET":
-        return render_template_string(HTML, msg=None, filename=None, url="")
+    if request.method == "POST":
+        url = (request.form.get("url") or "").strip()
+        up = request.files.get("cookies")
+        if up and up.filename:
+            up.save("/tmp/cookies.txt")
+            print("[cookie] uploaded -> /tmp/cookies.txt")
+        try:
+            _ = run_download(url)
+            # Başarılı indirme: hiçbir mesaj/link göstermeden ana forma dön
+            return redirect(url_for("index"))
+        except Exception as e:
+            msg = f"❌ İndirme Hatası: {e}"
+            return render_template_string(HTML, msg=msg, url=url), 400
 
-    # POST: indir, sonra /done'a redirect (form sıfırlansın)
-    url = (request.form.get("url") or "").strip()
-    up = request.files.get("cookies")
-    if up and up.filename:
-        up.save("/tmp/cookies.txt")
-        print("[cookie] uploaded -> /tmp/cookies.txt")
-
-    try:
-        filename = run_download(url)
-        return redirect(url_for("done", filename=filename))
-    except Exception as e:
-        msg = f"❌ İndirme Hatası: {e}"
-        # Hata varsa formu girilen URL ile tekrar göster (debug için)
-        return render_template_string(HTML, msg=msg, filename=None, url=url), 400
-
-@app.get("/done")
-def done():
-    filename = request.args.get("filename")
-    msg = "✅ İndirme tamamlandı."
-    # Form boş, sadece mesaj + indirme butonu
-    return render_template_string(HTML, msg=msg, filename=filename, url="")
+    # GET: her zaman boş form
+    return render_template_string(HTML, msg=None, url="")
 
 @app.route("/download/<path:filename>")
 def download(filename):
