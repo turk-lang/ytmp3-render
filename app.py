@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
 """
-YouTube → MP3 (Render-friendly) — Stabil Sürüm
-- Cookie varsa: tek strateji (web)
-- Cookie yoksa: android → web
+YouTube → MP3 (Render-friendly) — Stabil Sürüm (Template fix)
+- Jinja extends kaldırıldı; tek kabuk + içerik yerleştirme
+- Cookie varsa: tek strateji (web); yoksa android → web
 - player_client her zaman STRING (liste gelirse join)
 - Anti-bot hatasında kısa bekleme (3 sn)
-- Başarılı indirme → /done sayfası (İndir butonu); butona tıklayınca dosya iner ve otomatik / sayfasına döner (form sıfırlanır)
+- Başarılı indirme → /done (İndir butonu); butona tıklayınca dosya iner ve 1.5 sn sonra / (form sıfır)
 - /cookie_check: cookie sağlığı
 """
 
@@ -30,8 +30,8 @@ PROXY = (
     or os.environ.get("PROXY")
 )
 
-# --------- HTML ---------
-HTML_BASE = r"""<!doctype html>
+# --------- HTML Shell + Contents ---------
+HTML_SHELL = r"""<!doctype html>
 <html lang="tr">
 <head>
   <meta charset="utf-8">
@@ -55,7 +55,7 @@ HTML_BASE = r"""<!doctype html>
 </head>
 <body>
   <h2>YouTube → MP3</h2>
-  {% block content %}{% endblock %}
+  <!--CONTENT-->
   <div class="note">
     Not: FFmpeg varsa MP3'e dönüştürülür; yoksa m4a/webm kalır. Yalnızca hak sahibi olduğunuz içerikleri indirin.
   </div>
@@ -63,37 +63,33 @@ HTML_BASE = r"""<!doctype html>
 </html>
 """
 
-HTML_FORM = r"""{% extends none %}
-{% block content %}
+FORM_CONTENT = r"""
   <form method="post" enctype="multipart/form-data">
-    <input type="text" name="url" placeholder="https://www.youtube.com/watch?v=..." value="{{url or ''}}" required>
+    <input type="text" name="url" placeholder="https://www.youtube.com/watch?v=..." value="{url}" required>
     <div class="row">
       <input type="file" name="cookies" accept=".txt">
       <button type="submit">İndir</button>
     </div>
   </form>
-  {% if msg %}<div class="msg {{ 'ok' if msg_ok else 'err' }}">{{ msg|safe }}</div>{% endif %}
-{% endblock %}
+  {msg_block}
 """
 
-HTML_DONE = r"""{% extends none %}
-{% block content %}
+DONE_CONTENT = r"""
   <div class="msg ok">✅ İndirme tamamlandı.</div>
   <p style="margin-top:12px">
-    <a id="dlbtn" class="btn" href="/download/{{ filename }}"
+    <a id="dlbtn" class="btn" href="/download/{filename}"
        onclick="this.textContent='İndiriliyor...'; this.classList.add('disabled'); setTimeout(function(){ window.location='{{ url_for('index') }}'; }, 1500);">
       📥 Dosyayı indir
     </a>
   </p>
   <div class="divider"></div>
   <form method="post" enctype="multipart/form-data">
-    <input type="text" name="url" placeholder="Yeni link: https://www.youtube.com/watch?v=..." value="" required>
+    <input type="text" name="url" placeholder="Yeni link: https://www.youtube.com/watch?v=..." required>
     <div class="row">
       <input type="file" name="cookies" accept=".txt">
       <button type="submit">Yeni İndirme</button>
     </div>
   </form>
-{% endblock %}
 """
 
 app = Flask(__name__)
@@ -132,7 +128,7 @@ def ensure_cookiefile() -> Optional[str]:
 def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
     """player_clients: list[str] veya str kabul eder → stringe çevrilir."""
     if isinstance(player_clients, list):
-        player_clients = ",".join(player_clients)  # ✅ split hatasını önler
+        player_clients = ",".join(player_clients)  # ✅ list → string
     assert isinstance(player_clients, str), "player_clients string olmalı"
 
     opts: Dict[str, Any] = {
@@ -201,7 +197,7 @@ def run_download(url: str) -> str:
 
     cookie = ensure_cookiefile()
 
-    # Cookie varsa tek deneme (web). Yoksa 2 adım: android → web
+    # Cookie varsa tek deneme (web); yoksa 2 adım: android → web
     if cookie:
         strategies = [("Cookie + Web Client", ["web"])]
     else:
@@ -306,24 +302,28 @@ def index():
             print("[cookie] uploaded -> /tmp/cookies.txt")
         try:
             filename = run_download(url)
-            # Başarılı indirme: /done'a git (buton tıklanınca indirme ve otomatik / dönüş)
+            # Başarılı indirme: /done (buton tıklandığında indirme + 1.5 sn sonra /)
             return redirect(url_for("done", filename=filename))
         except Exception as e:
-            msg = f"❌ İndirme Hatası: {e}"
-            html = HTML_BASE.replace("{% block content %}{% endblock %}", HTML_FORM)
-            return render_template_string(html, msg=msg, msg_ok=False, url=url), 400
+            msg_html = f'<div class="msg err">❌ İndirme Hatası: {str(e)}</div>'
+            content = FORM_CONTENT.format(url=url, msg_block=msg_html)
+            return render_template_string(HTML_SHELL.replace("<!--CONTENT-->", content)), 400
 
     # GET: boş form
-    html = HTML_BASE.replace("{% block content %}{% endblock %}", HTML_FORM)
-    return render_template_string(html, msg=None, msg_ok=True, url="")
+    content = FORM_CONTENT.format(url="", msg_block="")
+    return render_template_string(HTML_SHELL.replace("<!--CONTENT-->", content))
 
 @app.get("/done")
 def done():
     filename = request.args.get("filename")
     if not filename:
         return redirect(url_for("index"))
-    html = HTML_BASE.replace("{% block content %}{% endblock %}", HTML_DONE)
-    return render_template_string(html, filename=filename)
+    content = DONE_CONTENT.format(filename=filename)
+    # NOT: DONE_CONTENT içinde 'url_for' çağrısı JS içinde string olarak var; dış şablonda çözülür:
+    page = HTML_SHELL.replace("<!--CONTENT-->", content)
+    # 'url_for' değerini yerleştir:
+    page = page.replace("{{ url_for('index') }}", url_for('index'))
+    return render_template_string(page)
 
 @app.route("/download/<path:filename>")
 def download(filename):
