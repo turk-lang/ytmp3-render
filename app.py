@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
 YouTube → MP3 (Render-friendly) — Stabil Sürüm (Template fix)
-- Jinja extends kaldırıldı; tek kabuk + içerik yerleştirme
-- Cookie varsa: tek strateji (web); yoksa android → web
-- player_client her zaman STRING (liste gelirse join)
-- Anti-bot hatasında kısa bekleme (3 sn)
+- Template sorunları düzeltildi
+- Rate limiting eklendi
+- Anti-bot koruması geliştirildi
 - Başarılı indirme → /done (İndir butonu); butona tıklayınca dosya iner ve 1.5 sn sonra / (form sıfır)
 - /cookie_check: cookie sağlığı
 """
@@ -30,6 +29,9 @@ PROXY = (
     or os.environ.get("PROXY")
 )
 
+# Session tracking for rate limiting
+download_sessions = {}
+
 # --------- HTML Shell + Contents ---------
 HTML_SHELL = r"""<!doctype html>
 <html lang="tr">
@@ -51,6 +53,7 @@ HTML_SHELL = r"""<!doctype html>
     .err{background:var(--errbg);color:var(--err);padding:12px;border-radius:8px}
     .note{margin-top:16px;font-size:.95em;color:var(--muted)}
     .divider{height:1px;background:#e5e7eb;margin:20px 0}
+    .countdown{font-size:0.9em;color:#666;margin-top:8px}
   </style>
 </head>
 <body>
@@ -58,6 +61,10 @@ HTML_SHELL = r"""<!doctype html>
   <!--CONTENT-->
   <div class="note">
     Not: FFmpeg varsa MP3'e dönüştürülür; yoksa m4a/webm kalır. Yalnızca hak sahibi olduğunuz içerikleri indirin.
+    <br><br>
+    <strong>Bot hatası alıyorsanız:</strong>
+    <br>• Chrome'da YouTube'a giriş yapın → F12 → Application → Cookies → youtube.com → tüm cookies'leri kopyalayıp cookies.txt dosyasına kaydedin
+    <br>• Environment variables: <code>YTDLP_PROXY</code> (önemli!)
   </div>
 </body>
 </html>
@@ -77,11 +84,12 @@ FORM_CONTENT = r"""
 DONE_CONTENT = r"""
   <div class="msg ok">✅ İndirme tamamlandı.</div>
   <p style="margin-top:12px">
-    <a id="dlbtn" class="btn" href="/download/{filename}"
-       onclick="this.textContent='İndiriliyor...'; this.classList.add('disabled'); setTimeout(function(){ window.location='{{ url_for('index') }}'; }, 1500);">
-      📥 Dosyayı indir
+    <a id="dlbtn" class="btn" href="#" onclick="downloadAndRedirect('/download/{filename}', '{filename}')">
+      🔥 Dosyayı indir
     </a>
   </p>
+  <div class="countdown" id="countdown"></div>
+  
   <div class="divider"></div>
   <form method="post" enctype="multipart/form-data">
     <input type="text" name="url" placeholder="Yeni link: https://www.youtube.com/watch?v=..." required>
@@ -90,6 +98,38 @@ DONE_CONTENT = r"""
       <button type="submit">Yeni İndirme</button>
     </div>
   </form>
+  
+  <script>
+    function downloadAndRedirect(url, filename) {{
+      // Dosyayı indir
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      
+      // Butonu güncelle
+      document.getElementById('dlbtn').textContent = 'İndiriliyor...';
+      document.getElementById('dlbtn').classList.add('disabled');
+      
+      // 2 saniye sonra ana sayfaya yönlendir
+      let seconds = 2;
+      const countdownEl = document.getElementById('countdown');
+      
+      const updateCountdown = () => {{
+        if (seconds > 0) {{
+          countdownEl.textContent = `${{seconds}} saniye sonra ana sayfaya dönülecek...`;
+          seconds--;
+          setTimeout(updateCountdown, 1000);
+        }} else {{
+          window.location.href = '/';
+        }}
+      }};
+      
+      updateCountdown();
+    }}
+  </script>
 """
 
 app = Flask(__name__)
@@ -105,25 +145,55 @@ def is_valid_youtube_url(url: str) -> bool:
     )
     return bool(pat.match(url or ""))
 
-def ensure_cookiefile() -> Optional[str]:
-    tmp = "/tmp/cookies.txt"
-    if os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-        print("[cookie] using /tmp/cookies.txt")
-        return tmp
-    candidates = [
-        os.environ.get("YTDLP_COOKIES"),
-        "/etc/secrets/cookies.txt",
-        "/etc/secrets/COOKIES.txt",
-        "/etc/secrets/youtube-cookies.txt",
-        "/app/cookies.txt",
+def check_rate_limit(ip: str) -> bool:
+    """Check if IP is rate limited. Returns True if allowed, False if blocked."""
+    current_time = time.time()
+    
+    if ip not in download_sessions:
+        download_sessions[ip] = []
+    
+    # Clean old sessions (older than 10 minutes)
+    download_sessions[ip] = [
+        timestamp for timestamp in download_sessions[ip] 
+        if current_time - timestamp < 600
     ]
-    for src in candidates:
-        if src and os.path.exists(src) and os.path.getsize(src) > 0:
-            shutil.copyfile(src, tmp)
-            print(f"[cookie] copied {src} -> {tmp}")
-            return tmp
-    print("[cookie] not found")
-    return None
+    
+    # Allow max 3 downloads per 10 minutes per IP
+    if len(download_sessions[ip]) >= 3:
+        return False
+    
+    # Add current session
+    download_sessions[ip].append(current_time)
+    return True
+
+def ensure_cookiefile(refresh: bool = False) -> Optional[str]:
+    """Ensure cookie file is available. If refresh=True, reload from sources."""
+    tmp = "/tmp/cookies.txt"
+    
+    # If refresh requested or tmp doesn't exist, reload from sources
+    if refresh or not (os.path.exists(tmp) and os.path.getsize(tmp) > 0):
+        candidates = [
+            os.environ.get("YTDLP_COOKIES"),
+            "/etc/secrets/cookies.txt",
+            "/etc/secrets/COOKIES.txt",
+            "/etc/secrets/youtube-cookies.txt",
+            "/app/cookies.txt",
+        ]
+        
+        for src in candidates:
+            if src and os.path.exists(src) and os.path.getsize(src) > 0:
+                shutil.copyfile(src, tmp)
+                print(f"[cookie] {'refreshed' if refresh else 'copied'} {src} -> {tmp}")
+                return tmp
+        
+        if refresh:
+            print("[cookie] refresh failed - no valid sources found")
+        else:
+            print("[cookie] not found")
+        return None
+    
+    print("[cookie] using existing /tmp/cookies.txt")
+    return tmp
 
 def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
     """player_clients: list[str] veya str kabul eder → stringe çevrilir."""
@@ -131,30 +201,47 @@ def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optio
         player_clients = ",".join(player_clients)  # ✅ list → string
     assert isinstance(player_clients, str), "player_clients string olmalı"
 
+    # Rotating User-Agents for better bot detection evasion
+    user_agents = [
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+    ]
+    import random
+    selected_ua = random.choice(user_agents)
+
     opts: Dict[str, Any] = {
         "outtmpl": os.path.join(DOWNLOAD_DIR, "%(title).90s.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
         "no_warnings": True,
         "cachedir": False,
-        "retries": 3,
-        "fragment_retries": 3,
-        "concurrent_fragment_downloads": 4,
+        "retries": 4,
+        "fragment_retries": 4,
+        "concurrent_fragment_downloads": 2,  # Reduced to be less aggressive
         "nocheckcertificate": True,
-        "socket_timeout": 30,
-        "http_chunk_size": 1048576,
+        "socket_timeout": 45,
+        "http_chunk_size": 524288,  # 512KB - smaller chunks
         "source_address": "0.0.0.0",
+        "sleep_interval_requests": 1,
+        "max_sleep_interval": 3,
         "http_headers": {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+            "User-Agent": selected_ua,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
         },
         "extractor_args": {
             "youtube": {
                 "player_client": player_clients,   # ✅ her zaman string
-                "skip": ["configs"],
+                "skip": ["configs", "webpage"],
+                "player_skip": ["js"],
             }
         },
-        "geo_bypass_country": "TR",
+        "geo_bypass_country": "US",  # Changed from TR to US
+        "no_check_formats": True,
     }
     if proxy:
         opts["proxy"] = proxy
@@ -195,18 +282,34 @@ def run_download(url: str) -> str:
     if not is_valid_youtube_url(url):
         raise ValueError("Geçerli bir YouTube URL'si giriniz.")
 
-    cookie = ensure_cookiefile()
+    cookie = ensure_cookiefile(refresh=False)
+    cookie_refreshed = False
 
-    # Cookie varsa tek deneme (web); yoksa 2 adım: android → web
+    # Enhanced strategies
     if cookie:
-        strategies = [("Cookie + Web Client", ["web"])]
+        strategies = [
+            ("Cookie + Android", ["android"]),
+            ("Cookie + TV", ["tv"]),
+            ("Cookie + Web", ["web"]),
+        ]
     else:
-        strategies = [("Mobile Clients", ["android", "web", "tv"]),
-                      ("Web Only", ["web"])]
+        strategies = [
+            ("Mobile Clients", ["android", "tv"]),
+            ("Android Only", ["android"]),
+            ("TV Only", ["tv"]),
+            ("Web Fallback", ["web"]),
+        ]
 
     last_err = None
     for idx, (name, clients) in enumerate(strategies, start=1):
         print(f"Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients) if isinstance(clients, list) else clients}")
+        
+        # Progressive delay for anti-bot
+        if idx > 1:
+            delay = min(1 + idx, 6)
+            print(f"  🕒 {delay}s bekleniyor...")
+            time.sleep(delay)
+        
         try:
             # 1) Probe
             opts_probe = build_opts(player_clients=clients, cookiefile=cookie, postprocess=False)
@@ -215,6 +318,9 @@ def run_download(url: str) -> str:
                 if info.get("is_live"):
                     raise DownloadError("Canlı yayın desteklenmiyor.")
                 fmt = choose_format(info)
+
+            # Small delay between probe and download
+            time.sleep(0.5)
 
             # 2) Download
             opts_dl = build_opts(player_clients=clients, cookiefile=cookie, postprocess=True)
@@ -240,16 +346,28 @@ def run_download(url: str) -> str:
 
         except Exception as e:
             last_err = e
+            error_msg = str(e).lower()
             print(f"❌ Strateji {idx} başarısız: {e}")
-            low = str(e).lower()
-            if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-                time.sleep(3)  # anti-bot baskısını yumuşat
+            
+            # Try refreshing cookie once if we encounter bot detection
+            if "sign in to confirm" in error_msg or "bot" in error_msg:
+                if not cookie_refreshed and idx <= 2:
+                    print("🔄 Cookie refresh deneniyor...")
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(3)
+            elif "rate" in error_msg or "limit" in error_msg:
+                time.sleep(5)
+            
             continue
 
     msg = str(last_err) if last_err else "Bilinmeyen hata"
     low = msg.lower()
     if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-        msg += "\nİpucu: güncel cookies.txt yükleyin ve/veya YTDLP_PROXY ile residential sticky proxy kullanın."
+        msg += ("\n\n🔧 Çözüm önerileri:"
+                "\n• Cookies.txt dosyasını yeniden yükleyin"
+                "\n• 5-10 dakika bekleyip tekrar deneyin"
+                "\n• YTDLP_PROXY environment variable kullanın")
     raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {msg}")
 
 # --------- Flask Routes ---------
@@ -295,14 +413,20 @@ def cookie_check():
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
+        # Rate limiting check
+        client_ip = request.environ.get('HTTP_X_FORWARDED_FOR', request.remote_addr)
+        if not check_rate_limit(client_ip):
+            msg_html = '<div class="msg err">⏳ Rate limit aşıldı. 10 dakika içinde maksimum 3 indirme yapabilirsiniz.</div>'
+            content = FORM_CONTENT.format(url="", msg_block=msg_html)
+            return render_template_string(HTML_SHELL.replace("<!--CONTENT-->", content)), 429
+
         url = (request.form.get("url") or "").strip()
         up = request.files.get("cookies")
         if up and up.filename:
             up.save("/tmp/cookies.txt")
-            print("[cookie] uploaded -> /tmp/cookies.txt")
+            print(f"[cookie] uploaded -> /tmp/cookies.txt (from {client_ip})")
         try:
             filename = run_download(url)
-            # Başarılı indirme: /done (buton tıklandığında indirme + 1.5 sn sonra /)
             return redirect(url_for("done", filename=filename))
         except Exception as e:
             msg_html = f'<div class="msg err">❌ İndirme Hatası: {str(e)}</div>'
@@ -318,12 +442,11 @@ def done():
     filename = request.args.get("filename")
     if not filename:
         return redirect(url_for("index"))
+    
+    # Template rendering with proper JavaScript escaping
     content = DONE_CONTENT.format(filename=filename)
-    # NOT: DONE_CONTENT içinde 'url_for' çağrısı JS içinde string olarak var; dış şablonda çözülür:
     page = HTML_SHELL.replace("<!--CONTENT-->", content)
-    # 'url_for' değerini yerleştir:
-    page = page.replace("{{ url_for('index') }}", url_for('index'))
-    return render_template_string(page)
+    return page  # Direct return, no render_template_string needed
 
 @app.route("/download/<path:filename>")
 def download(filename):
