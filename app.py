@@ -195,17 +195,19 @@ def ensure_cookiefile(refresh: bool = False) -> Optional[str]:
     print("[cookie] using existing /tmp/cookies.txt")
     return tmp
 
-def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True) -> Dict[str, Any]:
+def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optional[str] = PROXY, postprocess: bool = True, use_po_token: bool = False, aggressive_bypass: bool = False) -> Dict[str, Any]:
     """player_clients: list[str] veya str kabul eder → stringe çevrilir."""
     if isinstance(player_clients, list):
         player_clients = ",".join(player_clients)  # ✅ list → string
     assert isinstance(player_clients, str), "player_clients string olmalı"
 
-    # Rotating User-Agents for better bot detection evasion
+    # More realistic User-Agents (latest versions)
     user_agents = [
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
     ]
     import random
     selected_ua = random.choice(user_agents)
@@ -216,43 +218,69 @@ def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optio
         "quiet": True,
         "no_warnings": True,
         "cachedir": False,
-        "retries": 4,
-        "fragment_retries": 4,
-        "concurrent_fragment_downloads": 2,  # Reduced to be less aggressive
+        "retries": 6 if aggressive_bypass else 4,
+        "fragment_retries": 6 if aggressive_bypass else 4,
+        "concurrent_fragment_downloads": 1 if aggressive_bypass else 2,
         "nocheckcertificate": True,
-        "socket_timeout": 45,
-        "http_chunk_size": 524288,  # 512KB - smaller chunks
+        "socket_timeout": 60 if aggressive_bypass else 45,
+        "http_chunk_size": 262144 if aggressive_bypass else 524288,  # Even smaller chunks for aggressive mode
         "source_address": "0.0.0.0",
-        "sleep_interval_requests": 1,
-        "max_sleep_interval": 3,
+        "sleep_interval_requests": 2 if aggressive_bypass else 1,
+        "max_sleep_interval": 8 if aggressive_bypass else 3,
         "http_headers": {
             "User-Agent": selected_ua,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
-            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
             "DNT": "1",
             "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
         },
         "extractor_args": {
             "youtube": {
-                "player_client": player_clients,   # ✅ her zaman string
-                "skip": ["configs", "webpage"],
-                "player_skip": ["js"],
+                "player_client": player_clients,
+                "skip": ["configs"] if not aggressive_bypass else ["configs", "webpage", "js"],
+                "player_skip": ["js"] if not aggressive_bypass else ["js", "configs"],
+                "comment_sort": "top",
+                "max_comments": [0, 0, 0],  # Disable comment fetching
             }
         },
-        "geo_bypass_country": "US",  # Changed from TR to US
+        "geo_bypass_country": "US",
         "no_check_formats": True,
+        "ignore_no_formats_error": True,
+        "ignoreerrors": False,  # Don't ignore critical errors
     }
+    
+    # Add PO Token if available and requested
+    if use_po_token:
+        po_token = os.environ.get("YTDLP_PO_TOKEN")
+        visitor_data = os.environ.get("YTDLP_VISITOR_DATA")
+        if po_token and visitor_data:
+            opts["extractor_args"]["youtube"]["po_token"] = f"{po_token}:{visitor_data}"
+            print(f"[token] Using PO Token bypass")
+    
     if proxy:
         opts["proxy"] = proxy
+        print(f"[proxy] Using proxy: {proxy[:20]}...")
+    
     if cookiefile:
         opts["cookiefile"] = cookiefile
+    
     if postprocess and ffmpeg_available():
         opts["postprocessors"] = [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
             "preferredquality": "192",
+            "nopostoverwrites": False,
         }]
+    
     return opts
 
 def choose_format(info: Dict[str, Any]) -> str:
@@ -285,90 +313,158 @@ def run_download(url: str) -> str:
     cookie = ensure_cookiefile(refresh=False)
     cookie_refreshed = False
 
-    # Enhanced strategies
-    if cookie:
-        strategies = [
-            ("Cookie + Android", ["android"]),
-            ("Cookie + TV", ["tv"]),
-            ("Cookie + Web", ["web"]),
-        ]
-    else:
-        strategies = [
-            ("Mobile Clients", ["android", "tv"]),
-            ("Android Only", ["android"]),
-            ("TV Only", ["tv"]),
-            ("Web Fallback", ["web"]),
-        ]
+    # Enhanced strategies with more sophisticated bypass techniques
+    strategies = [
+        # Format: (name, clients, use_po_token, aggressive_bypass, delay)
+        ("PO Token + TV", ["tv"], True, False, 1),
+        ("PO Token + Android", ["android"], True, False, 1),
+        ("Cookie + iOS", ["ios"], False, False, 2),
+        ("Cookie + TV Embedded", ["tv_embedded"], False, True, 2),
+        ("Android Mobile", ["android"], False, False, 2),
+        ("TV Client", ["tv"], False, True, 3),
+        ("Web + Android Mix", ["web", "android"], False, True, 3),
+        ("iOS Fallback", ["ios"], False, True, 4),
+        ("All Clients Emergency", ["android", "tv", "ios", "web"], False, True, 5),
+    ]
 
     last_err = None
-    for idx, (name, clients) in enumerate(strategies, start=1):
-        print(f"Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients) if isinstance(clients, list) else clients}")
+    for idx, (name, clients, use_po_token, aggressive_bypass, base_delay) in enumerate(strategies, start=1):
+        print(f"Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients)}")
         
-        # Progressive delay for anti-bot
+        # Progressive delay with variation
         if idx > 1:
-            delay = min(1 + idx, 6)
-            print(f"  🕒 {delay}s bekleniyor...")
+            delay = base_delay + (idx * 0.5)
+            print(f"  🕒 {delay:.1f}s bekleniyor...")
             time.sleep(delay)
         
         try:
-            # 1) Probe
-            opts_probe = build_opts(player_clients=clients, cookiefile=cookie, postprocess=False)
+            # 1) Probe with enhanced options
+            opts_probe = build_opts(
+                player_clients=clients, 
+                cookiefile=cookie, 
+                postprocess=False, 
+                use_po_token=use_po_token,
+                aggressive_bypass=aggressive_bypass
+            )
+            
             with YoutubeDL(opts_probe) as y1:
+                print(f"  📡 Video bilgileri alınıyor...")
                 info = y1.extract_info(url, download=False)
+                
+                if not info:
+                    raise DownloadError("Video bilgileri alınamadı")
+                    
                 if info.get("is_live"):
                     raise DownloadError("Canlı yayın desteklenmiyor.")
+                    
+                # Check if video is available
+                if info.get("availability") in ["private", "premium_only", "subscriber_only", "needs_auth"]:
+                    raise DownloadError(f"Video erişilemez durumda: {info.get('availability')}")
+                
                 fmt = choose_format(info)
+                print(f"  🎵 Format seçildi: {fmt}")
 
-            # Small delay between probe and download
-            time.sleep(0.5)
+            # Delay between probe and download - critical for avoiding detection
+            delay_between = 1.5 if aggressive_bypass else 0.8
+            time.sleep(delay_between)
 
-            # 2) Download
-            opts_dl = build_opts(player_clients=clients, cookiefile=cookie, postprocess=True)
+            # 2) Download with same enhanced options
+            opts_dl = build_opts(
+                player_clients=clients, 
+                cookiefile=cookie, 
+                postprocess=True, 
+                use_po_token=use_po_token,
+                aggressive_bypass=aggressive_bypass
+            )
             opts_dl["format"] = fmt
 
+            print(f"  ⬇️ İndirme başlıyor...")
             before = set(os.listdir(DOWNLOAD_DIR))
             with YoutubeDL(opts_dl) as y2:
                 y2.download([url])
             after = set(os.listdir(DOWNLOAD_DIR))
+            
             new_files = sorted(
                 after - before,
                 key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)),
                 reverse=True
             )
             if new_files:
+                print(f"  ✅ Başarılı: {new_files[0]}")
                 return new_files[0]
 
-            # Nadir durum: isim tahmini
+            # Fallback filename generation
             title = (info.get("title") or "audio").strip()
             ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
             safe = "".join(c for c in f"{title}.{ext}" if c not in "\\/:*?\"<>|").strip()
-            return safe
+            if safe and len(safe) > 4:  # Valid filename
+                return safe
 
         except Exception as e:
             last_err = e
             error_msg = str(e).lower()
             print(f"❌ Strateji {idx} başarısız: {e}")
             
-            # Try refreshing cookie once if we encounter bot detection
-            if "sign in to confirm" in error_msg or "bot" in error_msg:
-                if not cookie_refreshed and idx <= 2:
-                    print("🔄 Cookie refresh deneniyor...")
+            # Specific error handling
+            if "failed to extract any player response" in error_msg:
+                print("  🔍 Player response hatası - daha agresif bypass gerekiyor")
+                if not cookie_refreshed and idx <= 3:
+                    print("  🔄 Cookie refresh + uzun bekleme...")
                     cookie = ensure_cookiefile(refresh=True)
                     cookie_refreshed = True
-                    time.sleep(3)
+                    time.sleep(5)  # Longer wait after player response failure
+                    
+            elif "sign in to confirm" in error_msg or "bot" in error_msg:
+                print("  🤖 Bot detection - cookie + proxy önerilir")
+                if not cookie_refreshed and idx <= 2:
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(4)
+                    
+            elif "private" in error_msg or "unavailable" in error_msg:
+                print("  🚫 Video erişilemez - diğer stratejiler de başarısız olacak")
+                break  # No point trying other strategies
+                
             elif "rate" in error_msg or "limit" in error_msg:
-                time.sleep(5)
+                print("  ⏳ Rate limit - uzun bekleme")
+                time.sleep(8)
+                
+            elif "network" in error_msg or "timeout" in error_msg:
+                print("  🌐 Ağ hatası - kısa bekleme")
+                time.sleep(2)
             
             continue
 
+    # All strategies failed
     msg = str(last_err) if last_err else "Bilinmeyen hata"
     low = msg.lower()
-    if ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-        msg += ("\n\n🔧 Çözüm önerileri:"
-                "\n• Cookies.txt dosyasını yeniden yükleyin"
-                "\n• 5-10 dakika bekleyip tekrar deneyin"
-                "\n• YTDLP_PROXY environment variable kullanın")
-    raise RuntimeError(f"Tüm anti-bot stratejileri başarısız: {msg}")
+    
+    # Enhanced error messages with specific solutions
+    hint = ""
+    if "failed to extract any player response" in low:
+        hint = ("\n\n🔧 Player Response Hatası - Çözüm Önerileri:"
+                "\n• Cookies.txt dosyasını Chrome'dan yeniden export edin"
+                "\n• YTDLP_PROXY ile residential/sticky proxy kullanın"
+                "\n• YTDLP_PO_TOKEN ve YTDLP_VISITOR_DATA environment variables ekleyin"
+                "\n• 15-30 dakika bekleyip tekrar deneyin"
+                "\n• Farklı bir network/IP'den deneyin")
+    elif ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
+        hint = ("\n\n🤖 Bot Detection - Çözüm Önerileri:"
+                "\n• Fresh cookies.txt dosyası yükleyin (oturum açık Chrome'dan)"
+                "\n• Kaliteli residential proxy kullanın"
+                "\n• VPN değiştirip farklı lokasyondan deneyin"
+                "\n• 10-15 dakika bekleyip tekrar deneyin")
+    elif ("private" in low) or ("unavailable" in low):
+        hint = "\n\n❌ Video özel, kaldırılmış veya coğrafi olarak engellenimiş."
+    elif ("rate" in low) or ("limit" in low):
+        hint = "\n\n⏳ Rate limit aşıldı. 15-30 dakika bekleyip tekrar deneyin."
+    else:
+        hint = ("\n\n💡 Genel Çözüm Önerileri:"
+                "\n• Video URL'sinin doğru ve erişilebilir olduğundan emin olun"
+                "\n• Cookies.txt ve proxy ayarlarını kontrol edin"
+                "\n• Yt-dlp'nin güncel olduğundan emin olun")
+    
+    raise RuntimeError(f"Tüm bypass stratejileri başarısız: {msg}{hint}")
 
 # --------- Flask Routes ---------
 @app.get("/health")
