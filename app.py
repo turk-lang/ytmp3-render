@@ -382,27 +382,237 @@ def choose_format(info: Dict[str, Any]) -> str:
 
 # --------- Core Download Function ---------
 def run_download(url: str) -> str:
-    """Main download function with enhanced error handling"""
+    """Main download function with 2024 enhanced anti-bot bypass"""
     if not url:
         raise ValueError("URL boş olamaz.")
     if not is_valid_youtube_url(url):
         raise ValueError("Geçerli bir YouTube URL'si giriniz.")
 
+    # Pre-flight checks and setup
+    print(f"🎯 Target URL: {url}")
     cookie = ensure_cookiefile(refresh=False)
     cookie_refreshed = False
+    
+    # Check if yt-dlp is up to date
+    try:
+        import subprocess
+        result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            print(f"📦 yt-dlp version: {result.stdout.strip()}")
+    except:
+        print("⚠️  Could not check yt-dlp version")
 
-    # Enhanced strategies with more sophisticated bypass techniques
+    # 2024 Anti-Bot Bypass Strategies - Prioritize working methods
     strategies = [
         # Format: (name, clients, use_po_token, aggressive_bypass, delay)
-        ("PO Token + TV", ["tv"], True, False, 1),
-        ("PO Token + Android", ["android"], True, False, 1),
-        ("Cookie + iOS", ["ios"], False, False, 2),
-        ("Cookie + TV Embedded", ["tv_embedded"], False, True, 2),
-        ("Android Mobile", ["android"], False, False, 2),
-        ("TV Client", ["tv"], False, True, 3),
-        ("Web + Android Mix", ["web", "android"], False, True, 3),
-        ("iOS Fallback", ["ios"], False, True, 4),
-        ("All Clients Emergency", ["android", "tv", "ios", "web"], False, True, 5),
+        ("Smart TV (Primary)", ["tv"], False, True, 1),
+        ("Android TV", ["android_creator"], False, True, 1), 
+        ("Mobile Web", ["mweb"], False, True, 2),
+        ("PO Token + Android", ["android"], True, True, 2),
+        ("iOS Music", ["ios_music"], False, True, 3),
+        ("TV Embedded", ["tv_embedded"], False, True, 3),
+        ("Android Creator Studio", ["android_creator"], False, True, 4),
+        ("Web Creator", ["web_creator"], False, True, 4),
+        ("Legacy Android", ["android_legacy"], False, True, 5),
+        ("All Bypass Mix", ["tv", "android_creator", "mweb"], False, True, 6),
+    ]
+
+    last_err = None
+    for idx, (name, clients, use_po_token, aggressive_bypass, base_delay) in enumerate(strategies, start=1):
+        print(f"\n🔄 Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients)}")
+        
+        # Progressive delay with jitter to avoid detection patterns
+        if idx > 1:
+            delay = base_delay + (idx * 0.7) + (random.uniform(0.5, 1.5))
+            print(f"  ⏱️  {delay:.1f}s bekleniyor...")
+            time.sleep(delay)
+        
+        try:
+            # Step 1: Information extraction with enhanced bypass
+            print(f"  📊 Video metadata extraction...")
+            opts_info = build_opts(
+                player_clients=clients, 
+                cookiefile=cookie, 
+                postprocess=False, 
+                use_po_token=use_po_token,
+                aggressive_bypass=aggressive_bypass
+            )
+            
+            # Add additional bypass for problematic videos
+            if idx > 3:  # More aggressive for later strategies
+                opts_info["sleep_interval_requests"] = 5
+                opts_info["max_sleep_interval"] = 15
+                opts_info["socket_timeout"] = 120
+            
+            with YoutubeDL(opts_info) as extractor:
+                info = extractor.extract_info(url, download=False)
+                
+                if not info:
+                    raise DownloadError("Video metadata extraction failed")
+                    
+                # Validate video availability
+                if info.get("is_live"):
+                    raise DownloadError("Live streams are not supported")
+                    
+                availability = info.get("availability")
+                if availability in ["private", "premium_only", "subscriber_only", "needs_auth", "unavailable"]:
+                    raise DownloadError(f"Video is not accessible: {availability}")
+                
+                # Age restriction check
+                if info.get("age_limit", 0) > 0:
+                    print(f"  🔞 Age-restricted content (limit: {info.get('age_limit')})")
+                    if not cookie:
+                        raise DownloadError("Age-restricted video requires cookies")
+                
+                # Format selection
+                fmt = choose_format(info)
+                title = info.get("title", "Unknown")[:50]
+                duration = info.get("duration", 0)
+                print(f"  ✅ '{title}' ({duration}s, format: {fmt})")
+
+            # Critical wait between extraction and download
+            inter_delay = 2.0 + (idx * 0.3) + random.uniform(0.2, 0.8)
+            print(f"  ⏳ Inter-step wait: {inter_delay:.1f}s")
+            time.sleep(inter_delay)
+
+            # Step 2: Actual download with same configuration
+            print(f"  ⬇️  Starting download...")
+            opts_download = build_opts(
+                player_clients=clients, 
+                cookiefile=cookie, 
+                postprocess=True, 
+                use_po_token=use_po_token,
+                aggressive_bypass=aggressive_bypass
+            )
+            opts_download["format"] = fmt
+            
+            # Additional download optimizations for difficult cases
+            if idx > 2:
+                opts_download["concurrent_fragment_downloads"] = 1
+                opts_download["http_chunk_size"] = 65536  # Very small chunks
+                opts_download["fragment_retries"] = 10
+            
+            # Track files before download
+            files_before = set(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else set()
+            
+            with YoutubeDL(opts_download) as downloader:
+                downloader.download([url])
+            
+            # Check for new files
+            files_after = set(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else set()
+            new_files = files_after - files_before
+            
+            if new_files:
+                # Get the most recent file (should be our download)
+                newest_file = max(
+                    new_files,
+                    key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f))
+                )
+                file_size = os.path.getsize(os.path.join(DOWNLOAD_DIR, newest_file))
+                print(f"  🎉 SUCCESS: {newest_file} ({file_size // 1024}KB)")
+                return newest_file
+
+            # Fallback: generate expected filename
+            title_clean = "".join(c for c in (info.get("title") or "audio") if c.isalnum() or c in " ._-")[:50].strip()
+            ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
+            fallback_name = f"{title_clean}.{ext}"
+            print(f"  📝 Using fallback filename: {fallback_name}")
+            return fallback_name
+
+        except Exception as e:
+            last_err = e
+            error_msg = str(e).lower()
+            print(f"❌ Strategy {idx} failed: {type(e).__name__}: {str(e)[:100]}...")
+            
+            # Enhanced error handling with specific recovery strategies
+            if "failed to extract any player response" in error_msg:
+                print("  🔍 Player response failure - trying cookie refresh + extended wait")
+                if not cookie_refreshed and idx <= 4:
+                    print("  🔄 Refreshing cookies...")
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(8 + random.uniform(2, 5))  # Extended random wait
+                    
+            elif "sign in to confirm" in error_msg or "bot" in error_msg:
+                print("  🤖 Bot detection - need fresh session")
+                if not cookie_refreshed and idx <= 3:
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(6 + random.uniform(1, 3))
+                    
+            elif any(keyword in error_msg for keyword in ["private", "unavailable", "removed", "deleted"]):
+                print("  🚫 Video is permanently unavailable")
+                break  # No point trying other strategies
+                
+            elif any(keyword in error_msg for keyword in ["rate", "limit", "quota", "too many requests"]):
+                print("  ⏳ Rate/quota limit hit - extended backoff")
+                wait_time = 15 + (idx * 3) + random.uniform(5, 10)
+                print(f"     Waiting {wait_time:.1f}s...")
+                time.sleep(wait_time)
+                
+            elif any(keyword in error_msg for keyword in ["network", "timeout", "connection", "resolve"]):
+                print("  🌐 Network/connection issue")
+                time.sleep(3 + random.uniform(1, 2))
+                
+            elif any(keyword in error_msg for keyword in ["age", "restricted"]):
+                print("  🔞 Age restriction - cookies essential")
+                if not cookie_refreshed:
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(4)
+                    
+            elif "format" in error_msg:
+                print("  🎵 Format selection issue - will try different strategy")
+            
+            continue
+
+    # All strategies exhausted - provide comprehensive error report
+    final_error = str(last_err) if last_err else "Unknown error occurred"
+    error_lower = final_error.lower()
+    
+    # Generate specific troubleshooting advice
+    troubleshooting = ""
+    if "failed to extract any player response" in error_lower:
+        troubleshooting = (
+            "\n\n🔧 PLAYER RESPONSE ERROR - Critical Solutions Needed:"
+            "\n• Update yt-dlp: pip install -U yt-dlp"  
+            "\n• Get fresh cookies: Chrome → youtube.com → F12 → Application → Cookies → Export all"
+            "\n• Use high-quality residential proxy: YTDLP_PROXY=http://user:pass@proxy:port"
+            "\n• Get PO Token: YTDLP_PO_TOKEN + YTDLP_VISITOR_DATA from browser"
+            "\n• Wait 30-60 minutes before retry"
+            "\n• Try different network/VPN location"
+        )
+    elif any(keyword in error_lower for keyword in ["bot", "sign in to confirm"]):
+        troubleshooting = (
+            "\n\n🤖 BOT DETECTION - Authentication Required:"
+            "\n• Upload fresh cookies.txt from logged-in Chrome session"
+            "\n• Use residential proxy (not datacenter/VPN)"
+            "\n• Try from different IP/location"
+            "\n• Wait 15-30 minutes between attempts"
+        )
+    elif any(keyword in error_lower for keyword in ["private", "unavailable"]):
+        troubleshooting = "\n\n❌ Video is private, deleted, or geo-blocked."
+    elif any(keyword in error_lower for keyword in ["rate", "limit"]):
+        troubleshooting = "\n\n⏳ Rate limit exceeded. Wait 30-60 minutes."
+    else:
+        troubleshooting = (
+            "\n\n💡 General Troubleshooting:"
+            "\n• Verify the URL is correct and accessible"
+            "\n• Check cookies.txt and proxy settings"
+            "\n• Update yt-dlp: pip install -U yt-dlp"
+            "\n• Try again in 10-15 minutes"
+        )
+    
+    raise RuntimeError(f"All bypass strategies failed.\nLast error: {final_error}{troubleshooting}") 1),
+        ("Android TV", ["android_creator"], False, True, 1), 
+        ("Mobile Web", ["mweb"], False, True, 2),
+        ("PO Token + Android", ["android"], True, True, 2),
+        ("iOS Music", ["ios_music"], False, True, 3),
+        ("TV Embedded", ["tv_embedded"], False, True, 3),
+        ("Android Creator Studio", ["android_creator"], False, True, 4),
+        ("Web Creator", ["web_creator"], False, True, 4),
+        ("Legacy Android", ["android_legacy"], False, True, 5),
+        ("All Bypass Mix", ["tv", "android_creator", "mweb"], False, True, 6),
     ]
 
     last_err = None
@@ -493,33 +703,40 @@ def run_download(url: str) -> str:
             error_msg = str(e).lower()
             print(f"❌ Strateji {idx} başarısız: {e}")
             
-            # Specific error handling
+            # Specific error handling with 2024 workarounds
             if "failed to extract any player response" in error_msg:
-                print("  🔍 Player response hatası - daha agresif bypass gerekiyor")
-                if not cookie_refreshed and idx <= 3:
-                    print("  🔄 Cookie refresh + uzun bekleme...")
+                print("  🔍 Player response hatası - agresif bypass + cookie refresh")
+                if not cookie_refreshed and idx <= 4:  # Try refresh on more strategies
+                    print("  🔄 Cookie refresh + extended wait...")
                     cookie = ensure_cookiefile(refresh=True)
                     cookie_refreshed = True
-                    time.sleep(5)  # Longer wait after player response failure
+                    time.sleep(8)  # Longer wait for player response issues
                     
             elif "sign in to confirm" in error_msg or "bot" in error_msg:
-                print("  🤖 Bot detection - cookie + proxy önerilir")
-                if not cookie_refreshed and idx <= 2:
+                print("  🤖 Bot detection - need fresh cookies + proxy")
+                if not cookie_refreshed and idx <= 3:
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(6)
+                    
+            elif "private" in error_msg or "unavailable" in error_msg or "removed" in error_msg:
+                print("  🚫 Video unavailable - skipping remaining strategies")
+                break  # No point trying other strategies
+                
+            elif "rate" in error_msg or "limit" in error_msg or "quota" in error_msg:
+                print("  ⏳ Rate/quota limit - extended wait")
+                time.sleep(15)  # Longer wait for rate limits
+                
+            elif "network" in error_msg or "timeout" in error_msg or "connection" in error_msg:
+                print("  🌐 Network issue - short wait")
+                time.sleep(3)
+                
+            elif "age" in error_msg or "restricted" in error_msg:
+                print("  🔞 Age restriction - cookies required")
+                if not cookie_refreshed:
                     cookie = ensure_cookiefile(refresh=True)
                     cookie_refreshed = True
                     time.sleep(4)
-                    
-            elif "private" in error_msg or "unavailable" in error_msg:
-                print("  🚫 Video erişilemez - diğer stratejiler de başarısız olacak")
-                break  # No point trying other strategies
-                
-            elif "rate" in error_msg or "limit" in error_msg:
-                print("  ⏳ Rate limit - uzun bekleme")
-                time.sleep(8)
-                
-            elif "network" in error_msg or "timeout" in error_msg:
-                print("  🌐 Ağ hatası - kısa bekleme")
-                time.sleep(2)
             
             continue
 
