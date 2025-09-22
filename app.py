@@ -12,6 +12,7 @@ import os
 import re
 import time
 import shutil
+import random
 from typing import Optional, Dict, Any, List, Tuple
 
 from flask import Flask, request, send_from_directory, render_template_string, jsonify, redirect, url_for
@@ -267,7 +268,6 @@ def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optio
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
     ]
-    import random
     selected_ua = random.choice(user_agents)
 
     opts: Dict[str, Any] = {
@@ -399,7 +399,7 @@ def run_download(url: str) -> str:
         result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
             print(f"📦 yt-dlp version: {result.stdout.strip()}")
-    except:
+    except Exception:
         print("⚠️  Could not check yt-dlp version")
 
     # 2024 Anti-Bot Bypass Strategies - Prioritize working methods
@@ -603,173 +603,7 @@ def run_download(url: str) -> str:
             "\n• Try again in 10-15 minutes"
         )
     
-    raise RuntimeError(f"All bypass strategies failed.\nLast error: {final_error}{troubleshooting}") 1),
-        ("Android TV", ["android_creator"], False, True, 1), 
-        ("Mobile Web", ["mweb"], False, True, 2),
-        ("PO Token + Android", ["android"], True, True, 2),
-        ("iOS Music", ["ios_music"], False, True, 3),
-        ("TV Embedded", ["tv_embedded"], False, True, 3),
-        ("Android Creator Studio", ["android_creator"], False, True, 4),
-        ("Web Creator", ["web_creator"], False, True, 4),
-        ("Legacy Android", ["android_legacy"], False, True, 5),
-        ("All Bypass Mix", ["tv", "android_creator", "mweb"], False, True, 6),
-    ]
-
-    last_err = None
-    for idx, (name, clients, use_po_token, aggressive_bypass, base_delay) in enumerate(strategies, start=1):
-        print(f"Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients)}")
-        
-        # Progressive delay with variation
-        if idx > 1:
-            delay = base_delay + (idx * 0.5)
-            print(f"  🕒 {delay:.1f}s bekleniyor...")
-            time.sleep(delay)
-        
-        try:
-            # 1) Probe with enhanced options
-            opts_probe = build_opts(
-                player_clients=clients, 
-                cookiefile=cookie, 
-                postprocess=False, 
-                use_po_token=use_po_token,
-                aggressive_bypass=aggressive_bypass
-            )
-            
-            with YoutubeDL(opts_probe) as y1:
-                print(f"  📡 Video bilgileri alınıyor...")
-                info = y1.extract_info(url, download=False)
-                
-                if not info:
-                    raise DownloadError("Video bilgileri alınamadı")
-                    
-                if info.get("is_live"):
-                    raise DownloadError("Canlı yayın desteklenmiyor.")
-                    
-                # Check if video is available
-                availability = info.get("availability")
-                if availability in ["private", "premium_only", "subscriber_only", "needs_auth", "unavailable"]:
-                    raise DownloadError(f"Video erişilemez durumda: {availability}")
-                
-                fmt = choose_format(info)
-                print(f"  🎵 Format seçildi: {fmt}")
-
-            # Delay between probe and download - critical for avoiding detection
-            delay_between = 1.5 if aggressive_bypass else 0.8
-            time.sleep(delay_between)
-
-            # 2) Download with same enhanced options
-            opts_dl = build_opts(
-                player_clients=clients, 
-                cookiefile=cookie, 
-                postprocess=True, 
-                use_po_token=use_po_token,
-                aggressive_bypass=aggressive_bypass
-            )
-            opts_dl["format"] = fmt
-
-            print(f"  ⬇️ İndirme başlıyor...")
-            before = set(os.listdir(DOWNLOAD_DIR))
-            
-            with YoutubeDL(opts_dl) as y2:
-                y2.download([url])
-                
-            after = set(os.listdir(DOWNLOAD_DIR))
-            
-            new_files = sorted(
-                after - before,
-                key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)),
-                reverse=True
-            )
-            
-            if new_files:
-                filename = new_files[0]
-                file_path = os.path.join(DOWNLOAD_DIR, filename)
-                file_size = os.path.getsize(file_path)
-                print(f"  ✅ Başarılı: {filename} ({file_size // 1024}KB)")
-                return filename
-
-            # Fallback filename generation
-            title = (info.get("title") or "audio").strip()
-            ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
-            safe_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._- "
-            safe_title = "".join(c for c in title if c in safe_chars)[:50]
-            safe_filename = f"{safe_title}.{ext}".strip()
-            
-            if safe_filename and len(safe_filename) > 4:
-                return safe_filename
-
-        except Exception as e:
-            last_err = e
-            error_msg = str(e).lower()
-            print(f"❌ Strateji {idx} başarısız: {e}")
-            
-            # Specific error handling with 2024 workarounds
-            if "failed to extract any player response" in error_msg:
-                print("  🔍 Player response hatası - agresif bypass + cookie refresh")
-                if not cookie_refreshed and idx <= 4:  # Try refresh on more strategies
-                    print("  🔄 Cookie refresh + extended wait...")
-                    cookie = ensure_cookiefile(refresh=True)
-                    cookie_refreshed = True
-                    time.sleep(8)  # Longer wait for player response issues
-                    
-            elif "sign in to confirm" in error_msg or "bot" in error_msg:
-                print("  🤖 Bot detection - need fresh cookies + proxy")
-                if not cookie_refreshed and idx <= 3:
-                    cookie = ensure_cookiefile(refresh=True)
-                    cookie_refreshed = True
-                    time.sleep(6)
-                    
-            elif "private" in error_msg or "unavailable" in error_msg or "removed" in error_msg:
-                print("  🚫 Video unavailable - skipping remaining strategies")
-                break  # No point trying other strategies
-                
-            elif "rate" in error_msg or "limit" in error_msg or "quota" in error_msg:
-                print("  ⏳ Rate/quota limit - extended wait")
-                time.sleep(15)  # Longer wait for rate limits
-                
-            elif "network" in error_msg or "timeout" in error_msg or "connection" in error_msg:
-                print("  🌐 Network issue - short wait")
-                time.sleep(3)
-                
-            elif "age" in error_msg or "restricted" in error_msg:
-                print("  🔞 Age restriction - cookies required")
-                if not cookie_refreshed:
-                    cookie = ensure_cookiefile(refresh=True)
-                    cookie_refreshed = True
-                    time.sleep(4)
-            
-            continue
-
-    # All strategies failed
-    msg = str(last_err) if last_err else "Bilinmeyen hata"
-    low = msg.lower()
-    
-    # Enhanced error messages with specific solutions
-    hint = ""
-    if "failed to extract any player response" in low:
-        hint = ("\n\n🔧 Player Response Hatası - Çözüm Önerileri:"
-                "\n• Cookies.txt dosyasını Chrome'dan yeniden export edin"
-                "\n• YTDLP_PROXY ile residential/sticky proxy kullanın"
-                "\n• YTDLP_PO_TOKEN ve YTDLP_VISITOR_DATA environment variables ekleyin"
-                "\n• 15-30 dakika bekleyip tekrar deneyin"
-                "\n• Farklı bir network/IP'den deneyin")
-    elif ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
-        hint = ("\n\n🤖 Bot Detection - Çözüm Önerileri:"
-                "\n• Fresh cookies.txt dosyası yükleyin (oturum açık Chrome'dan)"
-                "\n• Kaliteli residential proxy kullanın"
-                "\n• VPN değiştirip farklı lokasyondan deneyin"
-                "\n• 10-15 dakika bekleyip tekrar deneyin")
-    elif ("private" in low) or ("unavailable" in low):
-        hint = "\n\n❌ Video özel, kaldırılmış veya coğrafi olarak engellenmiş."
-    elif ("rate" in low) or ("limit" in low):
-        hint = "\n\n⏳ Rate limit aşıldı. 15-30 dakika bekleyip tekrar deneyin."
-    else:
-        hint = ("\n\n💡 Genel Çözüm Önerileri:"
-                "\n• Video URL'sinin doğru ve erişilebilir olduğundan emin olun"
-                "\n• Cookies.txt ve proxy ayarlarını kontrol edin"
-                "\n• Yt-dlp'nin güncel olduğundan emin olun")
-    
-    raise RuntimeError(f"Tüm bypass stratejileri başarısız: {msg}{hint}")
+    raise RuntimeError(f"All bypass strategies failed.\nLast error: {final_error}{troubleshooting}")
 
 # --------- Flask Routes ---------
 @app.errorhandler(413)
@@ -875,11 +709,12 @@ def index():
         if uploaded_file and uploaded_file.filename:
             try:
                 # Validate file size
-                if len(uploaded_file.read()) > 1024 * 1024:  # 1MB limit for cookie files
+                data = uploaded_file.read()
+                if len(data) > 1024 * 1024:  # 1MB limit for cookie files
                     raise ValueError("Cookie dosyası çok büyük (>1MB)")
                 
-                uploaded_file.seek(0)  # Reset file pointer
-                uploaded_file.save("/tmp/cookies.txt")
+                with open("/tmp/cookies.txt", "wb") as f:
+                    f.write(data)
                 print(f"[cookie] uploaded -> /tmp/cookies.txt (from {client_ip})")
             except Exception as e:
                 msg_html = f'<div class="msg err">❌ Cookie dosyası hatası: {str(e)}</div>'
