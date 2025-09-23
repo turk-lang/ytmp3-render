@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+msg_html = f'<div class="msg err">[ERROR] Indirme Hatasi: {error_msg}</div>'# -*- coding: utf-8 -*-
 """
 YouTube → MP3 (Render-friendly) — Stabil Sürüm (Template fix)
 - Template sorunları düzeltildi
@@ -240,7 +240,7 @@ def ensure_cookiefile(refresh: bool = False) -> Optional[str]:
             if src and os.path.exists(src) and os.path.getsize(src) > 0:
                 try:
                     shutil.copyfile(src, tmp)
-                    print(f"[cookie] {'refreshed' if refresh else 'copied'} {src} -> {tmp}")
+    print(f"[cookie] {'refreshed' if refresh else 'copied'} {src} -> {tmp}")
                     return tmp
                 except Exception as e:
                     print(f"[cookie] failed to copy {src}: {e}")
@@ -268,6 +268,7 @@ def build_opts(*, player_clients, cookiefile: Optional[str] = None, proxy: Optio
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0",
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15",
     ]
+    import random
     selected_ua = random.choice(user_agents)
 
     opts: Dict[str, Any] = {
@@ -389,7 +390,7 @@ def run_download(url: str) -> str:
         raise ValueError("Geçerli bir YouTube URL'si giriniz.")
 
     # Pre-flight checks and setup
-    print(f"🎯 Target URL: {url}")
+    print(f"[TARGET] URL: {url}")
     cookie = ensure_cookiefile(refresh=False)
     cookie_refreshed = False
     
@@ -398,38 +399,46 @@ def run_download(url: str) -> str:
         import subprocess
         result = subprocess.run(['yt-dlp', '--version'], capture_output=True, text=True, timeout=5)
         if result.returncode == 0:
-            print(f"📦 yt-dlp version: {result.stdout.strip()}")
-    except Exception:
-        print("⚠️  Could not check yt-dlp version")
+            print(f"[VERSION] yt-dlp version: {result.stdout.strip()}")
+    except:
+        print("[WARN] Could not check yt-dlp version")
 
-    # 2024 Anti-Bot Bypass Strategies - Prioritize working methods
-    strategies = [
-        # Format: (name, clients, use_po_token, aggressive_bypass, delay)
-        ("Smart TV (Primary)", ["tv"], False, True, 1),
-        ("Android TV", ["android_creator"], False, True, 1), 
-        ("Mobile Web", ["mweb"], False, True, 2),
-        ("PO Token + Android", ["android"], True, True, 2),
-        ("iOS Music", ["ios_music"], False, True, 3),
-        ("TV Embedded", ["tv_embedded"], False, True, 3),
-        ("Android Creator Studio", ["android_creator"], False, True, 4),
-        ("Web Creator", ["web_creator"], False, True, 4),
-        ("Legacy Android", ["android_legacy"], False, True, 5),
-        ("All Bypass Mix", ["tv", "android_creator", "mweb"], False, True, 6),
+    # CRITICAL 2024 FIX: YouTube requires OAuth/PO-Token for most videos
+    # Try alternative extraction methods first
+    alternative_strategies = [
+        # Use yt-dlp's emergency extraction modes
+        ("Emergency TV Client", ["tv"], False, True, 1, {"extractor_args": {"youtube": {"player_client": "tv", "innertube_host": "youtubei.googleapis.com", "innertube_key": "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"}}}),
+        ("Android Testsuite", ["android_testsuite"], False, True, 2, {}),
+        ("Web with Bypass", ["web"], False, True, 3, {"extractor_args": {"youtube": {"skip": ["dash", "hls"], "player_skip": ["configs"]}}}),
+        ("iOS Safari", ["ios"], False, True, 4, {}),
+        ("Media Connect", ["mediaconnect"], False, True, 5, {}),
     ]
 
+    # Standard 2024 Bypass Strategies 
+    standard_strategies = [
+        ("Smart TV (Primary)", ["tv"], False, True, 1, {}),
+        ("Android Creator", ["android_creator"], False, True, 2, {}), 
+        ("Mobile Web", ["mweb"], False, True, 3, {}),
+        ("PO Token + Android", ["android"], True, True, 4, {}),
+        ("iOS Music", ["ios_music"], False, True, 5, {}),
+    ]
+    
+    # Combine strategies: try emergency first, then standard
+    all_strategies = alternative_strategies + standard_strategies
+
     last_err = None
-    for idx, (name, clients, use_po_token, aggressive_bypass, base_delay) in enumerate(strategies, start=1):
-        print(f"\n🔄 Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients)}")
+    for idx, (name, clients, use_po_token, aggressive_bypass, base_delay, extra_opts) in enumerate(all_strategies, start=1):
+        print(f"\n[STRATEGY] {idx}/{len(all_strategies)}: {name} -> {','.join(clients)}")
         
         # Progressive delay with jitter to avoid detection patterns
         if idx > 1:
             delay = base_delay + (idx * 0.7) + (random.uniform(0.5, 1.5))
-            print(f"  ⏱️  {delay:.1f}s bekleniyor...")
+            print(f"  [DELAY] {delay:.1f}s wait...")
             time.sleep(delay)
         
         try:
             # Step 1: Information extraction with enhanced bypass
-            print(f"  📊 Video metadata extraction...")
+            print(f"  [EXTRACT] Video metadata extraction...")
             opts_info = build_opts(
                 player_clients=clients, 
                 cookiefile=cookie, 
@@ -438,11 +447,24 @@ def run_download(url: str) -> str:
                 aggressive_bypass=aggressive_bypass
             )
             
+            # Apply extra options for specific strategies
+            opts_info.update(extra_opts)
+            
             # Add additional bypass for problematic videos
-            if idx > 3:  # More aggressive for later strategies
+            if idx > 5:  # More aggressive for later strategies
                 opts_info["sleep_interval_requests"] = 5
                 opts_info["max_sleep_interval"] = 15
                 opts_info["socket_timeout"] = 120
+                # Try without cookies for some strategies
+                if "cookiefile" in opts_info and idx > 7:
+                    del opts_info["cookiefile"]
+                    print("  [NO-COOKIE] Trying without cookies...")
+            
+            # CRITICAL: Try with minimal extraction first for player response issues
+            if "player response" in str(last_err).lower() and idx > 3:
+                opts_info["extract_flat"] = False
+                opts_info["skip_download"] = True
+                print("  [MINIMAL] Using minimal extraction mode...")
             
             with YoutubeDL(opts_info) as extractor:
                 info = extractor.extract_info(url, download=False)
@@ -460,23 +482,23 @@ def run_download(url: str) -> str:
                 
                 # Age restriction check
                 if info.get("age_limit", 0) > 0:
-                    print(f"  🔞 Age-restricted content (limit: {info.get('age_limit')})")
+                    print(f"  [AGE] Age-restricted content (limit: {info.get('age_limit')})")
                     if not cookie:
-                        raise DownloadError("Age-restricted video requires cookies")
+                        print("  [WARN] Age restriction detected but no cookies available")
                 
                 # Format selection
                 fmt = choose_format(info)
                 title = info.get("title", "Unknown")[:50]
                 duration = info.get("duration", 0)
-                print(f"  ✅ '{title}' ({duration}s, format: {fmt})")
+                print(f"  [OK] '{title}' ({duration}s, format: {fmt})")
 
             # Critical wait between extraction and download
             inter_delay = 2.0 + (idx * 0.3) + random.uniform(0.2, 0.8)
-            print(f"  ⏳ Inter-step wait: {inter_delay:.1f}s")
+            print(f"  [WAIT] Inter-step wait: {inter_delay:.1f}s")
             time.sleep(inter_delay)
 
             # Step 2: Actual download with same configuration
-            print(f"  ⬇️  Starting download...")
+            print(f"  [DL] Starting download...")
             opts_download = build_opts(
                 player_clients=clients, 
                 cookiefile=cookie, 
@@ -484,13 +506,19 @@ def run_download(url: str) -> str:
                 use_po_token=use_po_token,
                 aggressive_bypass=aggressive_bypass
             )
+            opts_download.update(extra_opts)
             opts_download["format"] = fmt
             
             # Additional download optimizations for difficult cases
-            if idx > 2:
+            if idx > 3:
                 opts_download["concurrent_fragment_downloads"] = 1
                 opts_download["http_chunk_size"] = 65536  # Very small chunks
                 opts_download["fragment_retries"] = 10
+                
+            # Remove cookies for download if extraction succeeded without them
+            if "cookiefile" not in opts_info and "cookiefile" in opts_download:
+                del opts_download["cookiefile"]
+                print("  🚫 Download without cookies (matched extraction)")
             
             # Track files before download
             files_before = set(os.listdir(DOWNLOAD_DIR)) if os.path.exists(DOWNLOAD_DIR) else set()
@@ -526,16 +554,19 @@ def run_download(url: str) -> str:
             
             # Enhanced error handling with specific recovery strategies
             if "failed to extract any player response" in error_msg:
-                print("  🔍 Player response failure - trying cookie refresh + extended wait")
-                if not cookie_refreshed and idx <= 4:
+                print("  🔍 Player response failure - trying alternative approach")
+                if not cookie_refreshed and idx <= 6:
                     print("  🔄 Refreshing cookies...")
                     cookie = ensure_cookiefile(refresh=True)
                     cookie_refreshed = True
-                    time.sleep(8 + random.uniform(2, 5))  # Extended random wait
+                    # Try a longer wait with exponential backoff
+                    wait_time = min(30, 8 + (idx * 2))
+                    print(f"     Extended wait: {wait_time}s")
+                    time.sleep(wait_time)
                     
             elif "sign in to confirm" in error_msg or "bot" in error_msg:
                 print("  🤖 Bot detection - need fresh session")
-                if not cookie_refreshed and idx <= 3:
+                if not cookie_refreshed and idx <= 4:
                     cookie = ensure_cookiefile(refresh=True)
                     cookie_refreshed = True
                     time.sleep(6 + random.uniform(1, 3))
@@ -574,36 +605,229 @@ def run_download(url: str) -> str:
     troubleshooting = ""
     if "failed to extract any player response" in error_lower:
         troubleshooting = (
-            "\n\n🔧 PLAYER RESPONSE ERROR - Critical Solutions Needed:"
-            "\n• Update yt-dlp: pip install -U yt-dlp"  
-            "\n• Get fresh cookies: Chrome → youtube.com → F12 → Application → Cookies → Export all"
-            "\n• Use high-quality residential proxy: YTDLP_PROXY=http://user:pass@proxy:port"
-            "\n• Get PO Token: YTDLP_PO_TOKEN + YTDLP_VISITOR_DATA from browser"
-            "\n• Wait 30-60 minutes before retry"
-            "\n• Try different network/VPN location"
+            "\n\n[FIX] PLAYER RESPONSE ERROR - KRITIK COZUMLER:"
+            "\n[INFO] Bu hata YouTube'un 2024 sonrasi sikti anti-bot korumasindan kaynaklanir."
+            "\n"
+            "\n[QUICK] HIZLI COZUMLER:"
+            "\n• yt-dlp guncelle: pip install -U yt-dlp"  
+            "\n• Youtube'da giris yap → F12 → Application → Cookies → youtube.com → Tumunu kopyala"
+            "\n• Kopyalanan cookies'i cookies.txt olarak kaydet ve yukle"
+            "\n• VPN/proxy kullan: YTDLP_PROXY=http://proxy:port"
+            "\n"
+            "\n[ADVANCED] GELISMIS COZUMLER:"
+            "\n• PO Token al: Browser → F12 → Network → youtube.com → Request Headers'dan"
+            "\n• YTDLP_PO_TOKEN ve YTDLP_VISITOR_DATA environment variables set et"
+            "\n• Residential proxy kullan (datacenter proxy degil)"
+            "\n• 30-60 dakika bekle, farkli IP/lokasyondan dene"
+            "\n"
+            "\n[LAST] SON CARE:"
+            "\n• Video URL'sini farkli bir YouTube downloader ile dene"
+            "\n• youtube-dl yerine yt-dlp development version kullan"
+            "\n• Video sahipinden direkt linki iste"
         )
     elif any(keyword in error_lower for keyword in ["bot", "sign in to confirm"]):
         troubleshooting = (
-            "\n\n🤖 BOT DETECTION - Authentication Required:"
-            "\n• Upload fresh cookies.txt from logged-in Chrome session"
-            "\n• Use residential proxy (not datacenter/VPN)"
-            "\n• Try from different IP/location"
-            "\n• Wait 15-30 minutes between attempts"
+            "\n\n[BOT] BOT DETECTION - DOGRULAMA GEREKIYOR:"
+            "\n• Chrome'da YouTube'a giris yap"
+            "\n• F12 → Application → Cookies → youtube.com → Export all to cookies.txt"
+            "\n• Cookies.txt dosyasini uygulamaya yukle"
+            "\n• Residential proxy kullan (datacenter/VPN degil)"
+            "\n• Farkli IP/lokasyon dene"
+            "\n• Denemeler arasinda 15-30 dakika bekle"
         )
     elif any(keyword in error_lower for keyword in ["private", "unavailable"]):
-        troubleshooting = "\n\n❌ Video is private, deleted, or geo-blocked."
+        troubleshooting = (
+            "\n\n[UNAVAIL] VIDEO ERISILEMEZ:"
+            "\n• Video ozel, silinmis veya cografi olarak engellenmis"
+            "\n• Video sahibinin ayarlarini kontrol edin"
+            "\n• VPN ile farkli ulkeden deneyin"
+        )
     elif any(keyword in error_lower for keyword in ["rate", "limit"]):
-        troubleshooting = "\n\n⏳ Rate limit exceeded. Wait 30-60 minutes."
+        troubleshooting = (
+            "\n\n[RATE] RATE LIMIT ASILDI:"
+            "\n• YouTube indirme limitiniz doldu"
+            "\n• 30-60 dakika bekleyin"
+            "\n• Farkli IP/network kullanin"
+            "\n• Proxy kullanarak deneyin"
+        )
     else:
         troubleshooting = (
-            "\n\n💡 General Troubleshooting:"
-            "\n• Verify the URL is correct and accessible"
-            "\n• Check cookies.txt and proxy settings"
-            "\n• Update yt-dlp: pip install -U yt-dlp"
-            "\n• Try again in 10-15 minutes"
+            "\n\n[GENERAL] GENEL SORUN GIDERME:"
+            "\n• URL'nin dogru ve erisilebilir oldugunu kontrol edin"
+            "\n• Internet baglantinizi kontrol edin"
+            "\n• yt-dlp guncelleyin: pip install -U yt-dlp"
+            "\n• Cookies.txt ve proxy ayarlarini kontrol edin"
+            "\n• 10-15 dakika sonra tekrar deneyin"
+            "\n• Farkli bir video ile test edin"
         )
     
-    raise RuntimeError(f"All bypass strategies failed.\nLast error: {final_error}{troubleshooting}")
+    raise RuntimeError(f"Tüm bypass stratejileri başarısız oldu.\n\nSon hata: {final_error}{troubleshooting}")
+        ("Android TV", ["android_creator"], False, True, 1), 
+        ("Mobile Web", ["mweb"], False, True, 2),
+        ("PO Token + Android", ["android"], True, True, 2),
+        ("iOS Music", ["ios_music"], False, True, 3),
+        ("TV Embedded", ["tv_embedded"], False, True, 3),
+        ("Android Creator Studio", ["android_creator"], False, True, 4),
+        ("Web Creator", ["web_creator"], False, True, 4),
+        ("Legacy Android", ["android_legacy"], False, True, 5),
+        ("All Bypass Mix", ["tv", "android_creator", "mweb"], False, True, 6),
+    ]
+
+    last_err = None
+    for idx, (name, clients, use_po_token, aggressive_bypass, base_delay) in enumerate(strategies, start=1):
+        print(f"Strateji {idx}/{len(strategies)}: {name} -> {','.join(clients)}")
+        
+        # Progressive delay with variation
+        if idx > 1:
+            delay = base_delay + (idx * 0.5)
+            print(f"  🕒 {delay:.1f}s bekleniyor...")
+            time.sleep(delay)
+        
+        try:
+            # 1) Probe with enhanced options
+            opts_probe = build_opts(
+                player_clients=clients, 
+                cookiefile=cookie, 
+                postprocess=False, 
+                use_po_token=use_po_token,
+                aggressive_bypass=aggressive_bypass
+            )
+            
+            with YoutubeDL(opts_probe) as y1:
+                print(f"  📡 Video bilgileri alınıyor...")
+                info = y1.extract_info(url, download=False)
+                
+                if not info:
+                    raise DownloadError("Video bilgileri alınamadı")
+                    
+                if info.get("is_live"):
+                    raise DownloadError("Canlı yayın desteklenmiyor.")
+                    
+                # Check if video is available
+                availability = info.get("availability")
+                if availability in ["private", "premium_only", "subscriber_only", "needs_auth", "unavailable"]:
+                    raise DownloadError(f"Video erişilemez durumda: {availability}")
+                
+                fmt = choose_format(info)
+                print(f"  🎵 Format seçildi: {fmt}")
+
+            # Delay between probe and download - critical for avoiding detection
+            delay_between = 1.5 if aggressive_bypass else 0.8
+            time.sleep(delay_between)
+
+            # 2) Download with same enhanced options
+            opts_dl = build_opts(
+                player_clients=clients, 
+                cookiefile=cookie, 
+                postprocess=True, 
+                use_po_token=use_po_token,
+                aggressive_bypass=aggressive_bypass
+            )
+            opts_dl["format"] = fmt
+
+            print(f"  ⬇️ İndirme başlıyor...")
+            before = set(os.listdir(DOWNLOAD_DIR))
+            
+            with YoutubeDL(opts_dl) as y2:
+                y2.download([url])
+                
+            after = set(os.listdir(DOWNLOAD_DIR))
+            
+            new_files = sorted(
+                after - before,
+                key=lambda f: os.path.getmtime(os.path.join(DOWNLOAD_DIR, f)),
+                reverse=True
+            )
+            
+            if new_files:
+                filename = new_files[0]
+                file_path = os.path.join(DOWNLOAD_DIR, filename)
+                file_size = os.path.getsize(file_path)
+                print(f"  ✅ Başarılı: {filename} ({file_size // 1024}KB)")
+                return filename
+
+            # Fallback filename generation
+            title = (info.get("title") or "audio").strip()
+            ext = "mp3" if ffmpeg_available() else (info.get("ext") or "m4a")
+            safe_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._- "
+            safe_title = "".join(c for c in title if c in safe_chars)[:50]
+            safe_filename = f"{safe_title}.{ext}".strip()
+            
+            if safe_filename and len(safe_filename) > 4:
+                return safe_filename
+
+        except Exception as e:
+            last_err = e
+            error_msg = str(e).lower()
+            print(f"❌ Strateji {idx} başarısız: {e}")
+            
+            # Specific error handling with 2024 workarounds
+            if "failed to extract any player response" in error_msg:
+                print("  🔍 Player response hatası - agresif bypass + cookie refresh")
+                if not cookie_refreshed and idx <= 4:  # Try refresh on more strategies
+                    print("  🔄 Cookie refresh + extended wait...")
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(8)  # Longer wait for player response issues
+                    
+            elif "sign in to confirm" in error_msg or "bot" in error_msg:
+                print("  🤖 Bot detection - need fresh cookies + proxy")
+                if not cookie_refreshed and idx <= 3:
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(6)
+                    
+            elif "private" in error_msg or "unavailable" in error_msg or "removed" in error_msg:
+                print("  🚫 Video unavailable - skipping remaining strategies")
+                break  # No point trying other strategies
+                
+            elif "rate" in error_msg or "limit" in error_msg or "quota" in error_msg:
+                print("  ⏳ Rate/quota limit - extended wait")
+                time.sleep(15)  # Longer wait for rate limits
+                
+            elif "network" in error_msg or "timeout" in error_msg or "connection" in error_msg:
+                print("  🌐 Network issue - short wait")
+                time.sleep(3)
+                
+            elif "age" in error_msg or "restricted" in error_msg:
+                print("  🔞 Age restriction - cookies required")
+                if not cookie_refreshed:
+                    cookie = ensure_cookiefile(refresh=True)
+                    cookie_refreshed = True
+                    time.sleep(4)
+            
+            continue
+
+    # All strategies failed
+    msg = str(last_err) if last_err else "Bilinmeyen hata"
+    low = msg.lower()
+    
+    # Enhanced error messages with specific solutions
+    hint = ""
+    if "failed to extract any player response" in low:
+        hint = ("\n\n🔧 Player Response Hatası - Çözüm Önerileri:"
+                "\n• Cookies.txt dosyasını Chrome'dan yeniden export edin"
+                "\n• YTDLP_PROXY ile residential/sticky proxy kullanın"
+                "\n• YTDLP_PO_TOKEN ve YTDLP_VISITOR_DATA environment variables ekleyin"
+                "\n• 15-30 dakika bekleyip tekrar deneyin"
+                "\n• Farklı bir network/IP'den deneyin")
+    elif ("sign in to confirm you're not a bot" in low) or ("bot olmadığınızı" in low):
+        hint = ("\n\n🤖 Bot Detection - Çözüm Önerileri:"
+                "\n• Fresh cookies.txt dosyası yükleyin (oturum açık Chrome'dan)"
+                "\n• Kaliteli residential proxy kullanın"
+                "\n• VPN değiştirip farklı lokasyondan deneyin"
+                "\n• 10-15 dakika bekleyip tekrar deneyin")
+    elif ("private" in low) or ("unavailable" in low):
+        hint = "\n\n❌ Video özel, kaldırılmış veya coğrafi olarak engellenmiş."
+    elif ("rate" in low) or ("limit" in low):
+        hint = "\n\n⏳ Rate limit aşıldı. 15-30 dakika bekleyip tekrar deneyin."
+    else:
+        hint = ("\n\n💡 Genel Çözüm Önerileri:"
+                "\n• Video URL'sinin doğru ve erişilebilir olduğundan emin olun"
+                "\n• Cookies.txt ve proxy ayarlarını kontrol edin"
+                "\n• Yt-dlp'nin güncel olduğundan emin olun")
+    
+    raise RuntimeError(f"Tüm bypass stratejileri başarısız: {msg}{hint}")
 
 # --------- Flask Routes ---------
 @app.errorhandler(413)
@@ -698,7 +922,7 @@ def index():
                                                         request.remote_addr))
         
         if not check_rate_limit(client_ip):
-            msg_html = '<div class="msg err">⏳ Rate limit aşıldı. 10 dakika içinde maksimum 3 indirme yapabilirsiniz.</div>'
+            msg_html = '<div class="msg err">[RATE] Rate limit asildi. 10 dakika icinde maksimum 3 indirme yapabilirsiniz.</div>'
             content = FORM_CONTENT.format(url="", msg_block=msg_html)
             return render_template_string(HTML_SHELL.replace("<!--CONTENT-->", content)), 429
 
@@ -709,12 +933,11 @@ def index():
         if uploaded_file and uploaded_file.filename:
             try:
                 # Validate file size
-                data = uploaded_file.read()
-                if len(data) > 1024 * 1024:  # 1MB limit for cookie files
+                if len(uploaded_file.read()) > 1024 * 1024:  # 1MB limit for cookie files
                     raise ValueError("Cookie dosyası çok büyük (>1MB)")
                 
-                with open("/tmp/cookies.txt", "wb") as f:
-                    f.write(data)
+                uploaded_file.seek(0)  # Reset file pointer
+                uploaded_file.save("/tmp/cookies.txt")
                 print(f"[cookie] uploaded -> /tmp/cookies.txt (from {client_ip})")
             except Exception as e:
                 msg_html = f'<div class="msg err">❌ Cookie dosyası hatası: {str(e)}</div>'
@@ -842,11 +1065,11 @@ background_cleanup()
 
 if __name__ == "__main__":
     # Validate environment
-    print("🚀 YouTube to MP3 Converter başlatılıyor...")
-    print(f"📁 Download dizini: {DOWNLOAD_DIR}")
-    print(f"🔧 FFmpeg mevcut: {ffmpeg_available()}")
-    print(f"🌐 Proxy: {'Evet' if PROXY else 'Hayır'}")
-    print(f"🍪 Cookies: {'Evet' if ensure_cookiefile() else 'Hayır'}")
+    print("[STARTUP] YouTube to MP3 Converter baslatiliyor...")
+    print(f"[CONFIG] Download dizini: {DOWNLOAD_DIR}")
+    print(f"[CONFIG] FFmpeg mevcut: {ffmpeg_available()}")
+    print(f"[CONFIG] Proxy: {'Evet' if PROXY else 'Hayir'}")
+    print(f"[CONFIG] Cookies: {'Evet' if ensure_cookiefile() else 'Hayir'}")
     
     # Validate download directory permissions
     try:
@@ -854,18 +1077,18 @@ if __name__ == "__main__":
         with open(test_file, "w") as f:
             f.write("test")
         os.remove(test_file)
-        print("✅ Yazma izinleri OK")
+        print("[OK] Yazma izinleri OK")
     except Exception as e:
-        print(f"❌ UYARI: Yazma izin problemi: {e}")
+        print(f"[WARN] Yazma izin problemi: {e}")
     
     port = int(os.environ.get("PORT", "5000"))
     debug = os.environ.get("FLASK_DEBUG", "False").lower() == "true"
     
-    print(f"🌍 Sunucu http://0.0.0.0:{port} adresinde başlatılıyor...")
+    print(f"[SERVER] Sunucu http://0.0.0.0:{port} adresinde baslatiliyor...")
     
     try:
         app.run(host="0.0.0.0", port=port, debug=debug, threaded=True)
     except KeyboardInterrupt:
-        print("\n👋 Uygulama kapatılıyor...")
+        print("\n[EXIT] Uygulama kapatiliyor...")
     except Exception as e:
-        print(f"❌ Sunucu hatası: {e}")
+        print(f"[ERROR] Sunucu hatasi: {e}")
